@@ -1,0 +1,234 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+```
+
+
+```{r}
+library(sf)
+library(tidyverse)
+library(gridExtra)
+library(RColorBrewer)
+library(readxl)
+library(raster)
+
+library(fastmatch)
+library(rmapshaper)
+```
+
+```{r}
+APD_2015 <- st_read("/Volumes/Fabian_Work/Agricultural parcel data/2015.shp")
+
+```
+# Data availability
+
+#Agricultural parcel data 2015
+
+proj4string:    +proj=utm +zone=33 +ellps=GRS80 +units=m +no_defs
+
+Shape file with 11 columns:
+
++ `ID`: unique ID for each Agricultural Parcel (1.222621 Mio) - there can be multiple parcels per block
+
++ `KUND_LAN`: [Letter code for swedish regions](https://sv.wikipedia.org/wiki/Länsbokstav) 
+
+```{r}
+APD_2015 %>% 
+  group_by(KUND_LAN) %>% 
+  sample_frac(size = 0.01) %>% 
+  select(KUND_LAN) %>% 
+  plot(., col = .$KUND_LAN, border =.$KUND_LAN )
+```
+
+```{r}
+CC <- read_csv2("County_codes.csv")
+
+CC
+```
+
+
++ `KUND_LOPNR`: Customer ID (14983 unique IDs). The one who applies for subsidies
+    + Doesn't have to be the one who cultivates it (owner could take subsidies and rent it out afterwards)
+    + Doesn't have to be the owner (could rent land) 
+    + Large farms can have several costumer numbers (subsidary companies)
+    + Sometimes passing the land to younger generation results in two costumer numbers (the heirs might not divide the land but create a holding)
+
+
+```{r, fig.height=3, fig.width=5}
+
+p1 <- table(APD_2015$KUND_LOPNR) %>% 
+  sort(.,decreasing = T) %>% 
+  as.data.frame() %>% 
+  mutate(rank = 1:nrow(.)) %>% 
+  ggplot(aes(x = Freq))+
+  geom_histogram()+
+  scale_x_log10(breaks = c(1,10,100,1000))+
+  theme_bw()+
+  labs(title = "distribution of #parcels",
+       x= "number of plots / C.ID.")
+
+p2 <- table(APD_2015$KUND_LOPNR) %>% 
+  sort(.,decreasing = T) %>% 
+  as.data.frame() %>% 
+  mutate(rank = 1:nrow(.)) %>% 
+  mutate(cumsum = (cumsum(Freq)/sum(Freq))*100) %>% 
+  ggplot(aes(x = rank, y = cumsum))+
+  geom_point()+
+  theme_bw()+
+  labs(title = "cumulative %",
+       x= "C.ID. rank (largest to smallest)")
+
+grid.arrange(p1,p2, nrow = 1)
+
+```
+
+
++ `SAMIBLOCK_` : unique ID for each Reference Parcel (1.068528 Mio)
+
++ `SKIFTESBET` : ??, 3510 levels, first 200 make up > 90%, ( first 10 make up ~ 30%)
+
++ `EFATYPE`, 4 levels
+    + Kvavefixerade grodor (0.5%)
+    + Salix (0.1%)
+    + Skiften med insadd av vall (1.26%)
+    + Trada (3.3%)
+    + NA (94.8%)
+  
++ `SAMISKIFTE`: unique ID for each Agricultural Parcel (redundant with ID?)
+
++ `OBJECTID`: unique ID for each Agricultural Parcel (redundant with ID?)
+
++ `AREAL`: rounded area in hectar of each Agricultural Parcel (OBS, inconsisting rounding)
+
++ `OMKRETS`: sum of the perimeters of the polygones defining each  Agricultural Parcel. 
+  
++ `MYGRODKOD`: Crop codes, 82 levels
+    + 50 (Slåtter och betesvall på åker) - 41.6%
+    + 52 (Betesmark (ej åker)) - 16.6%
+    + 60 (Träda) - 9.3%
+    + 49 (Slåtter och betesvall på åkermark med  en  vallgröda som ej är godkänd för miljöersättning) - 7.4%
+    
+```{r}
+
+d1 <- table(APD_2015$MYGRODKOD) %>% 
+  sort(.,decreasing = T) %>% 
+  as.data.frame() %>% 
+  mutate(rank = 1:nrow(.)) 
+
+p3 <- d1 %>% 
+  ggplot(aes(x = rank, y = Freq))+
+  geom_bar(stat = "identity")+
+  theme_bw()+
+  labs(y = "# of parcels", x = "rank of cropcodes",
+       title = "distribution of crop codes")
+
+p4 <- d1 %>% 
+  mutate(Freq = signif((Freq / sum(Freq)) * 100, 2)) %>% 
+  filter(rank <= 7) %>%
+  ggplot(aes(x = rank, y = Freq, fill = Var1))+
+  geom_bar(stat = "identity")+
+  theme_bw()+
+  scale_fill_brewer(palette = "Set1", name = "Cropcode")+
+  labs(y = "% agricultural parcels", title = "7 most common cropcodes")
+  
+
+grid.arrange(p3,p4, nrow = 1)
+
+```
+    
+
++ `geometry`: Polygones defining the Agricultureal Parcels. Kan have holes
+  
+## Agricultural parcel data 2016
+
+Same as for 2015
+
+## Agricultural parcel data 2017
+
++ missing Costumer ID
++ only data for Skåne
++ pre-application data
+
+## List of crop codes
+
+(Grödkodslista+2017+webbexemplar+2017-01-16.xlsx)
+
++ defines each cropcode (in swedish)
++ bolean variables for subsedies stating whether that cropcode is elegible for that agri-environmental subsedy
++ bolean variables for subsedies stating whether that cropcode was elegible for that subsedy in the timeframe 2007-2013
+
+## List of additional subsidies
+
+Utvald+miljö+2017+webbexemplar+2016-12-09.xlsx
+
++ bolean variables for subsedies stating whether that cropcode is elegible for that subsedy
+
+
+
+#Reference parcel data 2014 (Blockdatabasen)
+
+`r st_crs(RPD_2015)`
+
+database with 7 columns
+
++ `blockid` unique ID for each reference parcel
+    + each block can have several skifte (up to 25 on 1 block??), and different cropcodes
+    + `r round((sum(table(RPD_2015$blockid) > 1)/length(unique(RPD_2015$blockid)))*100, 1)` % of blocks have more than 1 skifte
+    
++ `lan` [Letter code for swedish regions](https://sv.wikipedia.org/wiki/Länsbokstav) 
+
++ `kundnr` Customer ID (13896 unique IDs). The one who applies for subsidies
+    + Doesn't have to be the one who cultivates it (owner could take subsidies and rent it out afterwards)
+    + Doesn't have to be the owner (could rent land) 
+    + Large farms can have several costumer numbers (subsidary companies)
+    + Sometimes passing the land to younger generation results in two costumer numbers (the heirs might not divide the land but create a holding)
+
++ `grodkod` the crop codes. 
+    + There can be several cropcodes on one block
+    + we know how much of each cropcode (area) is in each block but not where
+
++ `areal` area of each cropcode in each skifte in each block (in ha)
+
++ `blockarea` area of the block (in ha)
+
++ `geometry` polygone defining the reference parcel
+
+#SLU forest map (kNN-Svergie)
+
+```{r}
+# path to data
+path_to_raster <- "/Volumes/Fabian_Work/SLU Forest Map/2010/Data/Raster/Sweref99TM"
+
+#list all layers
+files <- list.files(path_to_raster, full.names = T)
+
+#grep .tif files
+files <- files[grepl(".tif$", files)]
+
+#load first layer
+knnS <- raster(files[1])
+
+#add all layers
+
+for (i in 2:length(files)){
+  temp <- raster(files[i])
+  knnS <- stack(knnS, temp)
+}
+
+```
+
+
+
+Forest map for Sweden, based on the [Riksskogstaxeringen](https://www.slu.se/riksskogstaxeringen) (the swedish national forest inventory) and satelite imagery.
+
++ Rastermap with 25 m^2 resolution
++ based on k-nearest neighbourgh algorithm, matching satelite immagery with the weighted average of closest match from corresponing satelite imagery of known area, from the swedish national forest inventory.
+
+data:
+
++ Forest age
+    
