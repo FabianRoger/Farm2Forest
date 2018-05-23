@@ -1,0 +1,607 @@
+---
+title: "Farm typology"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+```
+
+this script contains code to define the farm typology used for the Farm2Forest project. 
+
+For that we link the 
+
++ blockdata
++ animal data
+
+
+
+```{r}
+library(sf)
+#library(raster)
+library(vegan)
+library(readr)
+library(ggplot2)
+library(plotly)
+library(readxl)
+library(dplyr)
+library(tidyr)
+```
+
+
+**geom_sf (to plot sf woth ggplot) is so far only available in the devellopment version of ggplot. The code below will check if it is available and install the devellopment version of ggplot if not**
+
+```{r, eval = FALSE}
+if( "ggplot2" %in% .packages() && exists('geom_sf', mode='function') == FALSE) {
+  
+  library(devtools)
+  devtools::install_github("tidyverse/ggplot2")
+  
+}
+
+```
+
+
+## load data
+
+### agricultural reference data 2012 
+
++ to match the animal data we create a varibale calle `kundnr1` composed of the `lan` and the `kundnr`
+
+```{r, eval = TRUE}
+RPD_2012 <- st_read("/Volumes/Fabian_Work/Reference parcel data shapelayers/S_jbb2012.shp") %>% 
+  mutate(kundnr1 = paste(lan, kundnr, sep = " "))
+head(as.data.frame(RPD_2012))
+```
+
+### LiveStock database 
+
++ containing data from 2005 to 2012
+
+```{r}
+Livestock <- read_csv("/Volumes/Fabian_Work/SJV_DATA/livestock_numbers.csv")
+Encoding(Livestock$djur)<- "latin1"
+
+Livestock <- 
+Livestock %>% 
+  filter(ar == 2012)
+  
+head(Livestock)
+```
+
+`%` of customer number from 2012 Livestock database also present in RPD
+
+```{r}
+
+Livestock %>% 
+  select(kundnr1) %>%
+  distinct() %>% 
+  mutate(N = n()) %>% 
+  filter(kundnr1 %in% RPD_2012$kundnr1) %>% 
+  summarise(kundnr_in_RPD = n(), N = unique(N)) %>% 
+  mutate(`%` = 100* kundnr_in_RPD/N)
+  
+```
+
+`%` of customer number RDP in Livestock database
+
+```{r, eval = TRUE}
+RPD_2012$kundnr1 %>%
+  unique() %>% 
+  `%in%`(Livestock$kundnr1) %>% 
+  sum() %>% 
+  `/`(length(unique(RPD_2012$kundnr1))) %>% 
+  `*`(100)
+```
+
+
+### load crop_codes
+
+`grodkod` contains the cropcodes as they have been defined through the years, from 1999 to 2012. We keep the definition for 2012 unless the cropcode is undefined in 2012 in which case we take the definition from the last year it is defined. 
+
+```{r, eval = TRUE}
+crop_codes <- 
+  read_xlsx("/Volumes/Fabian_Work/SJV_DATA/crop_codes_english.xlsx") %>% 
+  group_by(`Landuse code`) %>% 
+  filter(year == max(year)) %>% 
+  rename("grodkod" = `Landuse code`) %>% 
+  ungroup %>% 
+  mutate(grodkod = as.numeric(grodkod))
+
+head(crop_codes)
+```
+
+### load county codes
+
+```{r}
+county_codes <- read_tsv("County_codes.txt") %>% 
+  rename(lan = "ISO-code")
+
+county_codes
+```
+
+### load shapefile of Sweden
+
+```{r}
+Sweden <- st_read("/Volumes/Fabian_Work/Lantmateriet/GSD-Sverigekartor_vektor/1_milj/Sverige/Sweref_99_TM/shape/sve_1milj_Sweref_99_TM_shape/svk/riks/ak_riks.shp", stringsAsFactors = FALSE, options = "ENCODING=latin1")
+
+F2F_regions <- st_read("Shapes/prod_län_combi_byyann_skarning2.shp", stringsAsFactors = FALSE, options = "ENCODING=latin1")
+```
+
+
+## join data
+
++ join livestock data to the blockdatabase 
+  + by `knudnr1` ignoring the others
+  
++ join crop codes to the blockdatabase
+
+```{r, eval = TRUE}
+RPD_2012 <- left_join(RPD_2012, Livestock)
+
+RPD_2012 <- left_join(RPD_2012, crop_codes)
+
+```
+
+
+### subsample
+
++ rename county "L" to "M"
+> L was for Kristianstad County and M was for Malmöhus County but since they were merged to form Skåne County, M is usually used. O used to stand for Gothenburg and Bohus County but has been used for Västra Götaland County since it was merged with Skaraborg County (R) and Älvsborg County (P).
+
+source: (Wikipedia)[https://en.wikipedia.org/wiki/Counties_of_Sweden]
+
++ subsample 5% of the `kundnr1` within each county
+
+
+```{r, eval = FALSE}
+
+RPD_2012 <- 
+  RPD_2012 %>% 
+  mutate(lan = as.character(lan)) %>% 
+  mutate(lan = ifelse(lan == "L", "M", lan)) %>% 
+  mutate(lan = ifelse(lan %in% c("P", "R"), "O", lan))
+
+subsample <- RPD_2012 %>% 
+  st_set_geometry(NULL) %>%
+  select(kundnr1, lan) %>% 
+  distinct() %>% 
+  group_by(lan) %>% 
+  sample_frac(size = 0.05) 
+
+RPD_2012_sub <- 
+  filter(RPD_2012, kundnr1 %in% subsample$kundnr1)
+
+#rm(RPD_2012)
+#rm(Livestock)
+#rm(subsample)
+
+save.image(file = "Subsampled_joined_data_2012.RData")
+```
+
+Load joined and subsampled Blockdata
+
+```{r}
+load("Subsampled_joined_data_2012.RData")
+```
+
+
+## summary statistics
+
++ distribution of land are per kundnr
++ `blockarea` gives the area of the block, which corresponds to the area of the shape in the `geometry` column
++ `areal` gives the are of the crop *within* each block
+
+```{r}
+
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>%
+  group_by(kundnr1) %>% 
+  summarise(tot_area = sum(blockarea)) %>% 
+  ggplot(aes(x = tot_area)) +
+  geom_histogram(binwidth = 0.1, fill = "forestgreen", colour = NA, alpha = 0.8)+
+  stat_density(geom="line", aes(y=0.1 * ..count..), colour = "blue", size = 1)+
+  scale_x_log10()+
+  theme_minimal()+
+  labs(x = "total farm size in ha", title = "log-normal distribution of land are per kundnr" )
+
+
+```
+
+
+### what are the most important crops by area
+
+```{r}
+
+p <- RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>% 
+  group_by(lan, grodkod) %>% 
+  summarise(area_crop = sum(areal)) %>% 
+  arrange(lan, desc(area_crop)) %>% 
+  left_join(select(crop_codes, grodkod, English)) %>% 
+  mutate(rank = dense_rank(desc(area_crop))) %>% 
+  ungroup() %>% 
+  mutate(LS_group = ifelse(rank <= 4, English, "other")) %>% 
+  mutate(LS_group = fct_relevel(LS_group, "other", after = 0)) %>% 
+  left_join(county_codes) %>% 
+  rename(Crop = "English") %>% 
+  mutate(Area = paste(signif(area_crop / 1000, 2), "tsd ha")) %>%  
+  ggplot(aes(x = County, y = area_crop, fill = LS_group, label = Crop, label2 = Area))+
+  geom_bar(stat = "identity", colour = "white", size = 0.1)+
+  theme_minimal()+
+  theme(legend.position = "bottom")+
+  guides(fill=guide_legend(ncol = 2,byrow=F, reverse = T))+
+  scale_fill_brewer(palette = "Paired")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+  
+ggplotly(p, tooltip = c("label2", "label")) %>% layout(legend = list(orientation = "h", x = 0, y =-1))
+```
+
+
++ How does it look for lifestock?
+
+```{r}
+p <- 
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>% 
+  filter(!is.na(djurid)) %>% 
+  group_by(lan, djur) %>% 
+  summarise(antal_djur = sum(antal)) %>% 
+  arrange(lan, desc(antal_djur)) %>% 
+  mutate(rank = dense_rank(desc(antal_djur))) %>% 
+  ungroup() %>% 
+  mutate(LS_group = ifelse(rank <= 4, djur, "other")) %>%
+  mutate(LS_group = fct_relevel(LS_group, "other", after = 0)) %>% 
+  rename(Djur = "djur") %>% 
+  mutate(Antal = paste(signif(antal_djur / 1000, 3), "tsd")) %>%  
+  left_join(county_codes) %>% 
+  ggplot(aes(x = County, y = antal_djur, fill = LS_group, label = Djur, label2 = Antal))+
+  geom_bar(stat = "identity")+
+  theme_minimal()+
+  #theme(legend.position = "bottom")+
+  guides(fill=guide_legend(ncol = 4,byrow=F, reverse = T))+
+  scale_fill_manual(values=c(brewer.pal(8,"Paired"),brewer.pal(8,"Spectral")))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplotly(p, tooltip = c("label", "label2")) %>% layout(legend = list(orientation = "h", x = 0, y =-1))
+```
+
++ How does it look for lifestock-units?
+
+```{r}
+Livestock_id <- read_csv2("Livestock_id.csv")
+
+```
+
+
+### Farms with largest N of animals by animal
+```{r}
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>% 
+  filter(!is.na(djurid)) %>%
+  left_join(county_codes) %>% 
+  select(kundnr1, County, djur, antal) %>% 
+  distinct() %>% 
+  group_by(djur) %>% 
+  arrange(djur, desc(antal)) %>% 
+  top_n(5)
+
+
+```
+
+### distribution of animal/farm
+```{r}
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>% 
+  filter(!is.na(djur)) %>% 
+  group_by(kundnr1) %>% 
+  summarise(tot_lifestock = sum(antal)) %>% 
+  ggplot(aes(x = tot_lifestock)) +
+  geom_histogram(binwidth = 0.15, fill = "orange", colour = NA, alpha = 0.8)+
+  stat_density(geom="line", aes(y=0.15 * ..count..), colour = "red", size = 1)+
+  scale_x_log10()+
+  theme_minimal()+
+  labs(x = "lifestock units" )
+```
+
++ how many farms have *any* lifestock?
+
+```{r}
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>% 
+  group_by(kundnr1, lan) %>% 
+  summarise(tot_lifestock = sum(antal)) %>%
+  mutate(tot_lifestock = ifelse(is.na(tot_lifestock), 0,1)) %>% 
+  left_join(county_codes) %>% 
+  group_by(County) %>% 
+  summarise(`% lifestock holders` = sum(tot_lifestock) / n() * 100, lan = unique(lan)) %>% 
+  mutate(County = fct_reorder(County, `% lifestock holders`)) %>% 
+  mutate(target = ifelse(lan %in% c("M", "AC", "F"), "yes", "no")) %>% 
+  ggplot(aes(y = `% lifestock holders`, x = County, alpha = target, label = ))+
+  geom_bar(stat = "identity", fill = "orange")+
+  geom_text(aes(y = 3, label = paste(signif(`% lifestock holders`,2), "%")))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  coord_flip()+
+  theme_minimal()+
+  labs(title = "% of kundnr with any lifestock")+
+  scale_alpha_manual(values = c(0.6, 1), guide = "none")
+```
+
+# focusing on target regions: Jönköping, (norra) Skåne, Västernbotten
+
+```{r}
+
+RPD_2012_Reg <- 
+  RPD_2012_sub %>% 
+  filter(lan %in% c("M", "AC", "F"))
+  
+```
+
+## farm size by län
+
+```{r}
+
+RPD_2012_Reg %>% 
+  st_set_geometry(NULL) %>%
+  group_by(kundnr1, lan) %>% 
+  summarise(tot_area = sum(blockarea)) %>% 
+  left_join(county_codes) %>% 
+  ggplot(aes(x = tot_area)) +
+  geom_histogram(binwidth = 0.1, fill = "forestgreen", colour = NA)+
+  scale_x_log10()+
+  facet_wrap(~County)+
+  theme_minimal()+
+  labs(x = "total farm size in ha", title = "log-normal distribution of land are per kundnr" )
+
+
+```
+
+
+```{r}
+
+RPD_2012_Reg %>% 
+  st_set_geometry(NULL) %>%
+  group_by(kundnr1, lan) %>% 
+  summarise(tot_area = sum(blockarea)) %>% 
+  mutate(category = cut(tot_area, breaks=c(0, 20, 50, 100, 300, 500, Inf))) %>% 
+  group_by(lan, category) %>%
+  summarize(N = n()) %>% 
+  group_by(lan) %>% 
+  mutate(prct = signif(100*(N/sum(N)), 2)) %>% 
+  left_join(county_codes) %>% 
+  mutate(category = fct_rev(category)) %>% 
+  ggplot(aes(x = category, y = N))+
+  geom_bar(stat = "identity", fill = "forestgreen")+
+  geom_text(aes(label = prct, y = N/2), colour = "white", size = 3)+
+  facet_wrap(~County, ncol = 1)+
+  coord_flip()+
+  theme_minimal()+
+  labs(x = "farm size in ha", title = "number and % of farms in each size category")
+
+```
+
+```{r}
+
+RPD_2012_Reg %>% 
+  st_set_geometry(NULL) %>%
+  group_by(kundnr1, lan) %>% 
+  summarise(tot_area = sum(blockarea)) %>% 
+  mutate(category = cut(tot_area, breaks=c(0, 20, 50, 100, 300, 500, Inf))) %>% 
+  group_by(lan, category) %>%
+  summarize(tot_area = sum(tot_area)) %>% 
+  group_by(lan) %>% 
+  mutate(prct = signif(100*(tot_area/sum(tot_area)), 2)) %>% 
+  left_join(county_codes) %>% 
+  mutate(category = fct_rev(category)) %>% 
+  ggplot(aes(x = category, y = tot_area))+
+  geom_bar(stat = "identity", fill = "forestgreen")+
+  geom_text(aes(label = prct, y = tot_area/2 + 4000), colour = "black", size = 3)+
+  facet_wrap(~County, ncol = 1)+
+  coord_flip()+
+  theme_minimal()+
+  labs(x = "farm size in ha", y = "cumulative area", title = "cumulative area and % of area in each size category")
+
+```
+
+```{r}
+RPD_2012_Reg %>%
+  st_set_geometry(NULL) %>%
+  group_by(lan,kundnr1) %>% 
+  summarise(blockarea = sum(blockarea)) %>%
+  group_by(lan) %>% 
+  arrange(desc(blockarea)) %>% 
+  mutate(cum_area = cumsum(blockarea)) %>% 
+  mutate(cum_area = 100*cum_area / max(cum_area)) %>% 
+  mutate(cum_n = 1:n()) %>% 
+  mutate(cum_n = 100*cum_n/max(cum_n)) %>% 
+  left_join(county_codes) %>% 
+  ggplot(aes(cum_n, cum_area, colour = County))+
+  geom_line(size = 1, alpha = 0.8)+
+  scale_color_brewer(palette = "Set1")+
+  scale_x_continuous(limits = c(0,100), breaks = seq(0,100,10))+
+  scale_y_continuous(limits = c(0,100), breaks = seq(0,100,10))+
+  theme_bw()
+```
+
+
+```{r}
+Area_kndnr_M <- 
+RPD_2012 %>%
+  filter(lan == "M") %>% 
+  filter(st_contains(filter(Sweden_lan, LANSNAMN == "Skåne län"),
+                     filter(RPD_2012, lan == "M"), sparse = FALSE)) %>% 
+  group_by(kundnr1) %>% 
+  summarise(geometry = st_union(geometry, by_feature = FALSE), blockarea = sum(blockarea)) %>% 
+  Area_kndnr_M %>% mutate(Area = cut(blockarea, breaks=c(0, 20, 50, 100, 300, 500, Inf))) %>% 
+  mutate(Area = as.character(Area))
+```
+
+```{r}
+Area_kndnr_M %>% 
+ # st_simplify() %>% 
+  mutate(Area = cut(blockarea, breaks=c(0, 20, 50, 100, 300, 500, Inf))) %>%
+  ggplot(aes(fill = Area, colour = Area))+
+  geom_sf()+
+  geom_sf(data = filter(Sweden_lan, LANSNAMN == "Skåne län"), fill = NA, colour = "black")+
+  coord_sf(crs = st_crs(RPD_2012))+
+  scale_fill_viridis(discrete = T)+
+  scale_colour_viridis(discrete = T)+
+  theme_bw()+
+  labs(title = "Skåne län")
+
+types = unique(Area_kndnr_M$Area)
+N = length(types)
+cols <- leaflet::colorFactor(viridis_pal(option = "C")(N), domain = types)
+
+Area_kndnr_M %>% 
+  st_transform("+proj=longlat +datum=WGS84") %>% 
+  leaflet() %>%
+  addPolygons(
+    stroke = FALSE, # remove polygon borders
+    fillColor = ~cols(Area), # set fill color with function from above and value
+    fillOpacity = 0.8, smoothFactor = 0.5) %>% 
+  addLegend(position = 'topright',
+            colors = viridis_pal(option = "C")(N),
+            labels = types) %>% 
+  addTiles()
+```
+
+```{r}
+Area_kndnr_F <- 
+RPD_2012 %>%
+  filter(lan == "F") %>% 
+  filter(st_contains(filter(Sweden_lan, LANSNAMN == "Jönköpings län"),
+                     filter(RPD_2012, lan == "F"), sparse = FALSE)) %>% 
+  group_by(kundnr1) %>% 
+  summarise(geometry = st_union(geometry, by_feature = FALSE), blockarea = sum(blockarea))
+
+Area_kndnr_F %>% 
+  mutate(Area = cut(blockarea, breaks=c(0, 20, 50, 100, 300, 500, Inf))) %>%
+  ggplot(., aes(fill = Area, colour = Area))+
+  geom_sf()+
+  geom_sf(data = filter(Sweden_lan, LANSNAMN == "Jönköpings län"), fill = NA, colour = "black")+
+  coord_sf(crs = st_crs(RPD_2012))+
+  scale_fill_viridis(discrete = T)+
+  scale_colour_viridis(discrete = T)+
+  theme_bw()+
+  labs(title = "Jönköpings län")
+```
+
+```{r}
+Area_kndnr_AC <- 
+RPD_2012 %>%
+  filter(lan == "AC") %>% 
+  filter(st_contains(filter(Sweden_lan, LANSNAMN == "Västerbottens län"),
+                     filter(RPD_2012, lan == "AC"), sparse = FALSE)) %>% 
+  group_by(kundnr1) %>% 
+  summarise(blockarea = sum(blockarea)) %>% 
+  mutate(Area = cut(blockarea, breaks=c(0, 20, 50, 100, 300, 500, Inf))) %>% 
+  mutate(Area = as.character(Area))
+```
+
+```{r}
+Vp <- 
+  Area_kndnr_AC %>% 
+  mutate(Area = cut(blockarea, breaks=c(0, 20, 50, 100, 300, 500, Inf))) %>%
+  ggplot(., aes(fill = Area, colour = Area))+
+  geom_sf()+
+  geom_sf(data = filter(Sweden_lan, LANSNAMN == "Västerbottens län"), fill = NA, colour = "black")+
+  scale_fill_viridis(discrete = TRUE)+
+  scale_colour_viridis(discrete = TRUE)+
+  theme_bw()+
+  labs(title = "Västerbottens län")
+
+
+types = unique(Area_kndnr_AC$Area)
+N = length(types)
+cols <- leaflet::colorFactor(viridis_pal(option = "C")(N), domain = types)
+
+Area_kndnr_AC %>% 
+  st_transform("+proj=longlat +datum=WGS84") %>% 
+  leaflet() %>%
+  addPolygons(
+    stroke = FALSE, # remove polygon borders
+    fillColor = ~cols(Area), # set fill color with function from above and value
+    fillOpacity = 0.8, smoothFactor = 0.5) %>% 
+  addLegend(position = 'topright',
+            colors = viridis_pal(option = "C")(N),
+            labels = types) %>% 
+  addTiles()
+```
+
+
+
+
+
+
+
+cluster analysis just based on crop area
+```{r}
+
+Kund_crop <- 
+APD_2016_sub %>% 
+  dplyr::select(kundnr1, GRDKOD_MAR, AREA_crop) %>% 
+  st_set_geometry(NULL) %>% 
+  distinct() %>% 
+  spread(GRDKOD_MAR, AREA_crop, fill = 0) %>% 
+  select_if(function(x) sum(x) > 0) %>% 
+  ungroup
+
+Kund_crop_Cl <- 
+  Kund_crop %>% 
+  dplyr::select(-kundnr1) %>%
+  #mutate_all(function(x) x/max(x)) %>% 
+  princomp()
+  
+
+fviz_nbclust(Kund_crop_Cl, kmeans, method = "wss", nboot = 1, k.max = 20)
+  
+
+kmeans_KC <- Kund_crop_Cl %>% 
+  kmeans(14)
+  
+
+fviz_cluster(kmeans_KC, Kund_crop_Cl)+
+  scale_x_continuous(limits = c(0,10))+
+  scale_y_continuous(limits = c(-10,10))
+  
+  library("factoextra")
+fviz_nbclust(my_data, kmeans, method = "gap_stat")
+
+APD_2016_sub %>% 
+filter(KUND_LOPNR == 1805) %>% 
+select(GRDKOD_MAR) %>% 
+  distinct() %>% 
+  plot
+
+```
+
+
+
+```{r}
+p <- RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>%
+  select(blockid, areal, blockarea) %>% 
+  distinct() %>% 
+  group_by(blockid) %>% 
+  summarise(areal = sum(areal), blockarea = unique(blockarea)) %>% 
+  rowwise() %>% 
+  mutate(match = ifelse(between(areal, 
+                                blockarea - 0.05 * blockarea, 
+                                blockarea + 0.05 * blockarea), 
+                        "yes", "no")) %>% 
+  ggplot(aes(x = blockarea, y = areal, colour = match))+
+  geom_point(alpha = 0.2)+
+  geom_abline(slope = 1)
+  
+p <- p + theme_bw()
+ggplotly(p) %>% toWebGL()
+  
+  
+```
+
+```{r}
+st_read("Shapes/prod_län_combi_byyann_skarning2.shp") %>%  head
+```
+
+
