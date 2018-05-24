@@ -26,6 +26,7 @@ library(plotly)
 library(readxl)
 library(dplyr)
 library(tidyr)
+library(multidplyr)
 ```
 
 
@@ -44,6 +45,9 @@ if( "ggplot2" %in% .packages() && exists('geom_sf', mode='function') == FALSE) {
 
 ## load data
 
+we use the agricultural reference data from 2012 together with the animal data from 2012.
+We will use newer versions of both when available (waiting for animal data)
+
 ### agricultural reference data 2012 
 
 + to match the animal data we create a varibale calle `kundnr1` composed of the `lan` and the `kundnr`
@@ -54,9 +58,155 @@ RPD_2012 <- st_read("/Volumes/Fabian_Work/Reference parcel data shapelayers/S_jb
 head(as.data.frame(RPD_2012))
 ```
 
+### load shapefile of Sweden
+
++ we load a shapefile of Sweden with the administrative borders (kncluding the sea)
++ we load a shapefile that define our study regions (by Yann)
+
+```{r}
+Sweden <- st_read("/Volumes/Fabian_Work/Lantmateriet/GSD-Sverigekartor_vektor/1_milj/Sverige/Sweref_99_TM/shape/sve_1milj_Sweref_99_TM_shape/svk/riks/ak_riks.shp", stringsAsFactors = FALSE, options = "ENCODING=UTF-8")
+
+F2F_regions <- st_read("Shapes/prod_län_combi_byyann_skarning2.shp", stringsAsFactors = FALSE, options = "ENCODING=latin1")
+
+Sweden %>% 
+  group_by(LANSNAMN) %>% 
+  st_set_precision(100) %>% 
+  summarize(unique(LAN_KOD)) %>% 
+  ggplot()+
+  geom_sf()+
+  geom_sf(data = F2F_regions, aes(fill = LAN_NAMN) )
+```
+
+
+### load data about location of Farmsteads 
+```{r}
+Farmstead <- read_delim("/Volumes/Fabian_Work/Brukare_brukningscentrum_ansi.txt", delim = "\t", locale = locale(encoding = "latin1"))
+
+Farmstead <- filter(Farmstead, `Brukningscentrum JA/NEJ` == "Ja") %>% select(Kundnr, `Block Id`, `Brukningscentrum JA/NEJ`)
+```
+
+
+
+### subset for study regions
+
+we check for each block whether it intersects with either of the 3 study regions and then filter all kundnr that have at least one block in the study region
+
+because this is a rather time consuming operation we parallelize the code
+
+```{r}
+RDP_cl <- RPD_2012
+
+start <- proc.time()
+
+# initialize cluster and create groups (replace cores with number of cores you want to use)
+cl <- create_cluster(cores = 4)
+group <- rep(1:length(cl), length.out = nrow(RDP_cl))
+RDP_cl <- bind_cols(tibble(group), RDP_cl)
+
+RDP_cl <- RDP_cl %>%
+    partition(group, cluster = cl)
+
+# make relevant packages and data available to clusters
+RDP_cl %>% 
+  cluster_library("tidyverse") %>%
+  cluster_library("sf") %>% 
+  cluster_assign_value("F2F_regions", F2F_regions) 
+    
+RDP_cl <- 
+RDP_cl %>%
+  mutate(in_study_region = map(geometry, function(x) TRUE %in% st_within(x, F2F_regions$geometry, sparse = F))) %>% 
+   collect() %>% 
+  unnest(in_study_region)
+
+time_elapsed_parallel <- proc.time() - start 
+
+RDP_cl <- st_as_sf(RDP_cl)
+st_crs(RDP_cl) <- st_crs(RPD_2012)
+
+save.image(file = "Subsampled_joined_data_2012.RData")
+
+```
+
++ subset for all kundnr that have at least one block in either of the study regions
+
+```{r}
+Kundr_in_studyRegion <- filter(RDP_cl, in_study_region) %>% 
+  select(kundnr1) %>% unique
+
+RPD_2012_sub <- 
+  RDP_cl %>%
+  filter(kundnr1 %in% Kundr_in_studyRegion$kundnr1)
+```
+
++ check what proportion of kundnr have fields ouside the study regions
+```{r}
+
+Kundr_in_studyRegion <- 
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>% 
+  group_by(kundnr1, in_study_region) %>% 
+  summarise(area = sum(blockarea)) %>% 
+  arrange(kundnr1) %>% 
+  mutate(all_in_SR = case_when(FALSE %in% in_study_region ~ "no",
+                               ! FALSE %in% in_study_region ~ "yes",)) 
+
+length(unique(Kundr_in_studyRegion[Kundr_in_studyRegion$all_in_SR == "no", ]$kundnr1)) /
+  length(unique(Kundr_in_studyRegion$kundnr1)) * 100
+```
+
++ about 10% of the kundr have blocks inside and outside the study regions
+
+For those with blocks both inside and outside the study region, what proportion (by area) is inside teh study region?
+
+```{r}
+Kundr_notonly_SR <- 
+Kundr_in_studyRegion %>% 
+  filter(all_in_SR == "no") %>% 
+  spread(in_study_region, area) %>% 
+  mutate(prct_area_in_SR = `TRUE` / (`TRUE`+`FALSE`)) 
+
+Kundr_notonly_SR %>% 
+  ggplot(aes(x = prct_area_in_SR))+
+  geom_histogram()
+
+
+```
+
++ we keep all farms with a min of 25% of their landarea in the study regions
+
+```{r}
+
+kundnr_exclude <- Kundr_notonly_SR %>% 
+  filter(prct_area_in_SR < 0.25)
+
+RPD_2012_sub <- 
+  RPD_2012_sub %>% 
+  filter(!kundnr1 %in% kundnr_exclude$kundnr1) 
+
+RPD_2012_sub <- 
+Kundr_in_studyRegion %>% 
+  spread(in_study_region, area) %>% 
+  mutate(prct_area_in_SR = `TRUE` / (`TRUE`+`FALSE`)) %>% 
+  select(-`TRUE`, -`FALSE`) %>% 
+  mutate(prct_area_in_SR = case_when(all_in_SR == "yes" ~ 1,
+                                     all_in_SR == "no" ~ prct_area_in_SR)) %>% 
+left_join(RPD_2012_sub, .)
+  
+  
+
+```
+
++ export map with selected kundnr
+
+```{r}
+st_write(RPD_2012_sub, "RPD_2012_sub.gpkg", delete_layer = TRUE)
+```
+
+
 ### LiveStock database 
 
 + containing data from 2005 to 2012
++ we filter out data for 2012 only
 
 ```{r}
 Livestock <- read_csv("/Volumes/Fabian_Work/SJV_DATA/livestock_numbers.csv")
@@ -69,10 +219,11 @@ Livestock %>%
 head(Livestock)
 ```
 
++ check of correspondance between both databases 
+
 `%` of customer number from 2012 Livestock database also present in RPD
 
 ```{r}
-
 Livestock %>% 
   select(kundnr1) %>%
   distinct() %>% 
@@ -84,6 +235,7 @@ Livestock %>%
 ```
 
 `%` of customer number RDP in Livestock database
+(how many farms have any livestock?)
 
 ```{r, eval = TRUE}
 RPD_2012$kundnr1 %>%
@@ -120,15 +272,6 @@ county_codes <- read_tsv("County_codes.txt") %>%
 county_codes
 ```
 
-### load shapefile of Sweden
-
-```{r}
-Sweden <- st_read("/Volumes/Fabian_Work/Lantmateriet/GSD-Sverigekartor_vektor/1_milj/Sverige/Sweref_99_TM/shape/sve_1milj_Sweref_99_TM_shape/svk/riks/ak_riks.shp", stringsAsFactors = FALSE, options = "ENCODING=latin1")
-
-F2F_regions <- st_read("Shapes/prod_län_combi_byyann_skarning2.shp", stringsAsFactors = FALSE, options = "ENCODING=latin1")
-```
-
-
 ## join data
 
 + join livestock data to the blockdatabase 
@@ -144,15 +287,13 @@ RPD_2012 <- left_join(RPD_2012, crop_codes)
 ```
 
 
-### subsample
+
+
 
 + rename county "L" to "M"
 > L was for Kristianstad County and M was for Malmöhus County but since they were merged to form Skåne County, M is usually used. O used to stand for Gothenburg and Bohus County but has been used for Västra Götaland County since it was merged with Skaraborg County (R) and Älvsborg County (P).
 
 source: (Wikipedia)[https://en.wikipedia.org/wiki/Counties_of_Sweden]
-
-+ subsample 5% of the `kundnr1` within each county
-
 
 ```{r, eval = FALSE}
 
@@ -161,7 +302,12 @@ RPD_2012 <-
   mutate(lan = as.character(lan)) %>% 
   mutate(lan = ifelse(lan == "L", "M", lan)) %>% 
   mutate(lan = ifelse(lan %in% c("P", "R"), "O", lan))
+```
 
+
++ subsample 5% of the `kundnr1` within each county
+
+```{r, eval = FALSE}
 subsample <- RPD_2012 %>% 
   st_set_geometry(NULL) %>%
   select(kundnr1, lan) %>% 
