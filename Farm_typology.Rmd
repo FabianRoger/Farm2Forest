@@ -27,6 +27,7 @@ library(readxl)
 library(dplyr)
 library(tidyr)
 library(multidplyr)
+library(purrr)
 ```
 
 
@@ -66,7 +67,8 @@ head(as.data.frame(RPD_2012))
 ```{r}
 Sweden <- st_read("/Volumes/Fabian_Work/Lantmateriet/GSD-Sverigekartor_vektor/1_milj/Sverige/Sweref_99_TM/shape/sve_1milj_Sweref_99_TM_shape/svk/riks/ak_riks.shp", stringsAsFactors = FALSE, options = "ENCODING=UTF-8")
 
-F2F_regions <- st_read("Shapes/prod_län_combi_byyann_skarning2.shp", stringsAsFactors = FALSE, options = "ENCODING=latin1")
+F2F_regions <- st_read("Shapes/prod_län_combi_byyann_skarning2.shp", stringsAsFactors = FALSE, options = "ENCODING= UTF-8") %>% 
+  mutate(LAN_NAMN = c("Jönköpings län", "Skåne", "Västerbottens län"))
 
 Sweden %>% 
   group_by(LANSNAMN) %>% 
@@ -114,36 +116,82 @@ RDP_cl %>%
     
 RDP_cl <- 
 RDP_cl %>%
-  mutate(in_study_region = map(geometry, function(x) TRUE %in% st_within(x, F2F_regions$geometry, sparse = F))) %>% 
-   collect() %>% 
-  unnest(in_study_region)
+  mutate(in_study_region = map(geometry, function(x) st_within(x, F2F_regions$geometry, sparse = F))) %>% 
+  collect()  
+  
 
 time_elapsed_parallel <- proc.time() - start 
 
-RDP_cl <- st_as_sf(RDP_cl)
-st_crs(RDP_cl) <- st_crs(RPD_2012)
+
+```
+
+we tested for each block if it is in either of the three study regions, resulting in a logical list-column. as the list colum contains a 1 x 3 matrix we first need to transform it to a vector of length 3, and then we can unnest it.
+
+```{r}
+RPD_2012_sub <- 
+RDP_cl %>% 
+  mutate(in_study_region = map(in_study_region, function(x) c(unlist(x)))) %>% 
+  unnest(in_study_region, .preserve = geometry) %>% 
+  ungroup() %>% 
+  mutate(region = rep(F2F_regions$LAN_NAMN, nrow(.)/3)) 
+
 
 save.image(file = "Subsampled_joined_data_2012.RData")
 
+
 ```
+
 
 + subset for all kundnr that have at least one block in either of the study regions
 
 ```{r}
-Kundr_in_studyRegion <- filter(RDP_cl, in_study_region) %>% 
+Kundr_in_studyRegion <- filter(RPD_2012_sub, in_study_region) %>% 
   select(kundnr1) %>% unique
 
 RPD_2012_sub <- 
-  RDP_cl %>%
+  RPD_2012_sub %>%
   filter(kundnr1 %in% Kundr_in_studyRegion$kundnr1)
 ```
 
-+ check what proportion of kundnr have fields ouside the study regions
+check if any block is assigned to more than one region
+
+```{r}
+
+RPD_2012_sub %>% 
+  select(blockid, in_study_region, region) %>% 
+  distinct() %>% 
+  group_by(blockid) %>% 
+  summarise(in_study_region = sum(in_study_region)) %>% 
+  filter(in_study_region > 1) 
+
+```
+
+simplify dataset to only have one row per blockid x grodkod/areal combination with a logical colum `in_study_region` and a colum `region` giving the study region or else NA. 
+
+```{r}
+Blocks_in_sr <- 
+  RPD_2012_sub %>% 
+  select(blockid, in_study_region, region) %>% 
+  filter(in_study_region) %>% 
+  distinct
+
+RPD_2012_sub <- 
+RPD_2012_sub %>% 
+  select(-in_study_region, -region) %>% 
+  distinct() %>% 
+  left_join(Blocks_in_sr) %>% 
+  mutate(in_study_region = case_when(is.na(in_study_region) ~ FALSE,
+                                     TRUE ~ TRUE))
+
+```
+
+
+
++ check what proportion of kundnr have fields outside the study regions
 ```{r}
 
 Kundr_in_studyRegion <- 
 RPD_2012_sub %>% 
-  st_set_geometry(NULL) %>% 
   group_by(kundnr1, in_study_region) %>% 
   summarise(area = sum(blockarea)) %>% 
   arrange(kundnr1) %>% 
@@ -156,7 +204,7 @@ length(unique(Kundr_in_studyRegion[Kundr_in_studyRegion$all_in_SR == "no", ]$kun
 
 + about 10% of the kundr have blocks inside and outside the study regions
 
-For those with blocks both inside and outside the study region, what proportion (by area) is inside teh study region?
+For those with blocks both inside and outside the study region, what proportion (by area) is inside the study region?
 
 ```{r}
 Kundr_notonly_SR <- 
@@ -167,7 +215,9 @@ Kundr_in_studyRegion %>%
 
 Kundr_notonly_SR %>% 
   ggplot(aes(x = prct_area_in_SR))+
-  geom_histogram()
+  geom_histogram()+
+  geom_vline(xintercept = 0.25, colour = "red", linetype = "dashed")+
+  theme_bw()
 
 
 ```
@@ -199,6 +249,8 @@ left_join(RPD_2012_sub, .)
 + export map with selected kundnr
 
 ```{r}
+RPD_2012_sub <- 
+
 st_write(RPD_2012_sub, "RPD_2012_sub.gpkg", delete_layer = TRUE)
 ```
 
@@ -218,10 +270,9 @@ Livestock %>%
   
 head(Livestock)
 ```
-
 + check of correspondance between both databases 
 
-`%` of customer number from 2012 Livestock database also present in RPD
+`%` of customer number from 2012 Livestock database also present in full RPD
 
 ```{r}
 Livestock %>% 
@@ -234,15 +285,30 @@ Livestock %>%
   
 ```
 
-`%` of customer number RDP in Livestock database
+```{r}
+Livestock %>% 
+  mutate(N_kundnr = 4 - (is.na(kundnr1) + is.na(kundnr2) + is.na(kundnr3) + is.na(kundnr4))) %>% 
+  select(N_kundnr) %>% 
+  table()
+```
+
+There are up to 4 kundnr per customer in the Livestock database and some entries have no kundnr. We only take the first one into account and remove the remaining 3. 
+
+```{r}
+Livestock <- Livestock %>% 
+  select(-kundnr2, -kundnr3, -kundnr4)
+```
+
+
+`%` of customer number in subsetted RDP in Livestock database
 (how many farms have any livestock?)
 
 ```{r, eval = TRUE}
-RPD_2012$kundnr1 %>%
+RPD_2012_sub$kundnr1 %>%
   unique() %>% 
   `%in%`(Livestock$kundnr1) %>% 
   sum() %>% 
-  `/`(length(unique(RPD_2012$kundnr1))) %>% 
+  `/`(length(unique(RPD_2012_sub$kundnr1))) %>% 
   `*`(100)
 ```
 
@@ -258,7 +324,9 @@ crop_codes <-
   filter(year == max(year)) %>% 
   rename("grodkod" = `Landuse code`) %>% 
   ungroup %>% 
-  mutate(grodkod = as.numeric(grodkod))
+  mutate(grodkod = as.numeric(grodkod)) %>% 
+  select(-Swedish) %>% 
+  dplyr::rename(crop_name = English)
 
 head(crop_codes)
 ```
@@ -266,28 +334,23 @@ head(crop_codes)
 ### load county codes
 
 ```{r}
-county_codes <- read_tsv("County_codes.txt") %>% 
-  rename(lan = "ISO-code")
-
-county_codes
+# county_codes <- read_tsv("County_codes.txt") %>% 
+#   rename(lan = "ISO-code")
+# 
+# county_codes
 ```
 
 ## join data
 
 + join livestock data to the blockdatabase 
-  + by `knudnr1` ignoring the others
-  
 + join crop codes to the blockdatabase
 
 ```{r, eval = TRUE}
-RPD_2012 <- left_join(RPD_2012, Livestock)
+RPD_2012_sub <- left_join(RPD_2012_sub, Livestock)
 
-RPD_2012 <- left_join(RPD_2012, crop_codes)
+RPD_2012_sub <- left_join(RPD_2012_sub, crop_codes)
 
 ```
-
-
-
 
 
 + rename county "L" to "M"
