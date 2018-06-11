@@ -3,10 +3,40 @@ title: Farm typology"
 output: html_notebook
 ---
 
+load libraries
+
+
+
+```{r}
+library(sf)
+#library(raster)
+library(vegan)
+library(readr)
+library(ggplot2)
+library(plotly)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(multidplyr)
+library(purrr)
+library(forcats)
+library(RColorBrewer)
+library(igraph)
+```
+
+
+### import selected Farms 
+
+```{r}
+RPD_2012_sub <- st_read("RPD_2012_sub.gpkg")
+```
+
+
 ### LiveStock database 
 
 + containing data from 2005 to 2012
 + we filter out data for 2012 only
+
 
 ```{r}
 Livestock <- read_csv("/Volumes/Fabian_Work/SJV_DATA/livestock_numbers.csv")
@@ -14,24 +44,12 @@ Encoding(Livestock$djur)<- "latin1"
 
 Livestock <- 
 Livestock %>% 
-  filter(ar == 2012)
+  filter(ar == 2012) 
+  
   
 head(Livestock)
 ```
-+ check of correspondance between both databases 
 
-`%` of customer number from 2012 Livestock database also present in full RPD
-
-```{r}
-Livestock %>% 
-  select(kundnr1) %>%
-  distinct() %>% 
-  mutate(N = n()) %>% 
-  filter(kundnr1 %in% RPD_2012$kundnr1) %>% 
-  summarise(kundnr_in_RPD = n(), N = unique(N)) %>% 
-  mutate(`%` = 100* kundnr_in_RPD/N)
-  
-```
 
 ```{r}
 Livestock %>% 
@@ -40,7 +58,7 @@ Livestock %>%
   table()
 ```
 
-There are up to 4 kundnr per customer in the Livestock database and some entries have no kundnr. We only take the first one into account and remove the remaining 3. 
+There are up to 4 kundnr per customer in the Livestock database and some entries have no kundnr. We only take the first one into account and remove the remaining 3. records without kundr will be filtered out when we join the data.
 
 ```{r}
 Livestock <- Livestock %>% 
@@ -48,17 +66,45 @@ Livestock <- Livestock %>%
 ```
 
 
++ check of correspondance between the lifestock datatbase and the Blockdatabase
+
+`%` of customer number from 2012 Livestock database also present in full RPD
+
+```{r}
+RPD_2012 <- st_read("/Volumes/Fabian_Work/Reference parcel data shapelayers/S_jbb2012.shp")
+RPD_2012 <-  mutate(RPD_2012, kundnr1 = paste(lan, kundnr, sep = " "))
+
+kundnr_in_RPD <- 
+Livestock %>% 
+  select(kundnr1) %>%
+  distinct() %>% 
+  mutate(N = n()) %>% 
+  filter(kundnr1 %in% RPD_2012$kundnr1) %>% 
+  summarise(kundnr_in_RPD = n(), N = unique(N)) %>% 
+  mutate(`%` = 100* kundnr_in_RPD/N)
+
+rm(RPD_2012)  
+
+kundnr_in_RPD
+```
+
+all but one kundnr from the Livestock database is found in the RPD database 
+
+
 `%` of customer number in subsetted RDP in Livestock database
 (how many farms have any livestock?)
 
 ```{r, eval = TRUE}
-RPD_2012_sub$kundnr1 %>%
-  unique() %>% 
-  `%in%`(Livestock$kundnr1) %>% 
-  sum() %>% 
-  `/`(length(unique(RPD_2012_sub$kundnr1))) %>% 
-  `*`(100)
+RPD_2012_sub %>%
+  st_set_geometry(NULL) %>% 
+  select(region, kundnr1) %>% 
+  distinct() %>% 
+  mutate(in_livestock = kundnr1 %in% Livestock$kundnr1) %>% 
+  group_by(region) %>% 
+  summarise(`% kundnr with livestock` = round(sum(in_livestock) / n() * 100, 1))
+  
 ```
+
 
 
 ### load crop_codes
@@ -70,7 +116,8 @@ crop_codes <-
   read_xlsx("/Volumes/Fabian_Work/SJV_DATA/crop_codes_english.xlsx") %>% 
   group_by(`Landuse code`) %>% 
   filter(year == max(year)) %>% 
-  rename("grodkod" = `Landuse code`) %>% 
+  rename(grodkod = `Landuse code`) %>% 
+  rename(cropcode_year = year) %>% 
   ungroup %>% 
   mutate(grodkod = as.numeric(grodkod)) %>% 
   select(-Swedish) %>% 
@@ -79,14 +126,6 @@ crop_codes <-
 head(crop_codes)
 ```
 
-### load county codes
-
-```{r}
-# county_codes <- read_tsv("County_codes.txt") %>% 
-#   rename(lan = "ISO-code")
-# 
-# county_codes
-```
 
 ## join data
 
@@ -94,53 +133,16 @@ head(crop_codes)
 + join crop codes to the blockdatabase
 
 ```{r, eval = TRUE}
+Livestock <- Livestock %>% 
+  select(djurid, djur, antal, kundnr1)
+
 RPD_2012_sub <- left_join(RPD_2012_sub, Livestock)
 
 RPD_2012_sub <- left_join(RPD_2012_sub, crop_codes)
 
+as_tibble(RPD_2012_sub)
 ```
 
-
-+ rename county "L" to "M"
-> L was for Kristianstad County and M was for Malmöhus County but since they were merged to form Skåne County, M is usually used. O used to stand for Gothenburg and Bohus County but has been used for Västra Götaland County since it was merged with Skaraborg County (R) and Älvsborg County (P).
-
-source: (Wikipedia)[https://en.wikipedia.org/wiki/Counties_of_Sweden]
-
-```{r, eval = FALSE}
-
-RPD_2012 <- 
-  RPD_2012 %>% 
-  mutate(lan = as.character(lan)) %>% 
-  mutate(lan = ifelse(lan == "L", "M", lan)) %>% 
-  mutate(lan = ifelse(lan %in% c("P", "R"), "O", lan))
-```
-
-
-+ subsample 5% of the `kundnr1` within each county
-
-```{r, eval = FALSE}
-subsample <- RPD_2012 %>% 
-  st_set_geometry(NULL) %>%
-  select(kundnr1, lan) %>% 
-  distinct() %>% 
-  group_by(lan) %>% 
-  sample_frac(size = 0.05) 
-
-RPD_2012_sub <- 
-  filter(RPD_2012, kundnr1 %in% subsample$kundnr1)
-
-#rm(RPD_2012)
-#rm(Livestock)
-#rm(subsample)
-
-save.image(file = "Subsampled_joined_data_2012.RData")
-```
-
-Load joined and subsampled Blockdata
-
-```{r}
-load("Subsampled_joined_data_2012.RData")
-```
 
 
 ## summary statistics
@@ -153,14 +155,21 @@ load("Subsampled_joined_data_2012.RData")
 
 RPD_2012_sub %>% 
   st_set_geometry(NULL) %>%
-  group_by(kundnr1) %>% 
+  select(region, kundnr1, blockarea) %>% 
+  distinct() %>% 
+  group_by(region, kundnr1) %>% 
   summarise(tot_area = sum(blockarea)) %>% 
-  ggplot(aes(x = tot_area)) +
-  geom_histogram(binwidth = 0.1, fill = "forestgreen", colour = NA, alpha = 0.8)+
+  mutate(median = median(tot_area)) %>% 
+  ggplot(aes(x = tot_area, fill = region)) +
+  geom_histogram(binwidth = 0.1, alpha = 0.8)+
   stat_density(geom="line", aes(y=0.1 * ..count..), colour = "blue", size = 1)+
+  geom_vline(aes(xintercept = median))+
+  geom_text(aes(label = round(median), x = median+100, y = 250))+
+  facet_wrap(~region, nrow = 1)+
   scale_x_log10()+
   theme_minimal()+
-  labs(x = "total farm size in ha", title = "log-normal distribution of land are per kundnr" )
+  labs(x = "total farm size in ha", title = "log-normal distribution of land area per kundnr" )
+  
 
 
 ```
@@ -172,18 +181,19 @@ RPD_2012_sub %>%
 
 p <- RPD_2012_sub %>% 
   st_set_geometry(NULL) %>% 
-  group_by(lan, grodkod) %>% 
+  select(region, grodkod, areal, blockid) %>% 
+  distinct() %>% 
+  group_by(region, grodkod) %>% 
   summarise(area_crop = sum(areal)) %>% 
-  arrange(lan, desc(area_crop)) %>% 
-  left_join(select(crop_codes, grodkod, English)) %>% 
+  arrange(region, desc(area_crop)) %>% 
+  left_join(select(crop_codes, grodkod, crop_name)) %>% 
   mutate(rank = dense_rank(desc(area_crop))) %>% 
   ungroup() %>% 
-  mutate(LS_group = ifelse(rank <= 4, English, "other")) %>% 
+  mutate(LS_group = ifelse(rank <= 6, crop_name, "other")) %>% 
   mutate(LS_group = fct_relevel(LS_group, "other", after = 0)) %>% 
-  left_join(county_codes) %>% 
-  rename(Crop = "English") %>% 
+  rename(Crop = "crop_name") %>% 
   mutate(Area = paste(signif(area_crop / 1000, 2), "tsd ha")) %>%  
-  ggplot(aes(x = County, y = area_crop, fill = LS_group, label = Crop, label2 = Area))+
+  ggplot(aes(x = region, y = area_crop, fill = LS_group, label = Crop, label2 = Area))+
   geom_bar(stat = "identity", colour = "white", size = 0.1)+
   theme_minimal()+
   theme(legend.position = "bottom")+
@@ -194,6 +204,61 @@ p <- RPD_2012_sub %>%
 ggplotly(p, tooltip = c("label2", "label")) %>% layout(legend = list(orientation = "h", x = 0, y =-1))
 ```
 
++ How does it look only for grazing land?
+
+```{r}
+
+# biodiversity fallow...............................69
+# bird field........................................17
+# fallow............................................60
+# fallow............................................62
+# forest pasture....................................54
+# ley...............................................50
+# ley  (non eligible)...............................51
+# mosaic pastures...................................96
+# mountain pasture (eligible).......................61
+# mountain pasture (non-eligible)...................55
+# mown meadow.......................................53
+# mown meadow (non-eligible)........................98
+# mown meadow (no single-payer).....................19
+# non-approved crop (pasture).......................92
+# non-approved ley (contains non-ley species).......49
+# pasture...........................................52
+# pasture (non-eligible)............................97
+# pasture under restoration.........................95
+# pasture (no single-payer).........................18
+# unused pasture....................................89
+
+
+p <- RPD_2012_sub %>%
+  st_set_geometry(NULL) %>% 
+  select(region, grodkod, areal, blockid) %>% 
+  distinct() %>% 
+  filter(grodkod %in% c(69,17,60,62,54,50,51,96,61,55,
+                        53,98,19,92,49,52,97,95,18,89)) %>% 
+  group_by(region, grodkod) %>% 
+  summarise(area_crop = sum(areal)) %>% 
+  arrange(region, desc(area_crop)) %>% 
+  left_join(select(crop_codes, grodkod, crop_name)) %>% 
+  mutate(rank = dense_rank(desc(area_crop))) %>% 
+  ungroup() %>% 
+  mutate(LS_group = ifelse(rank <= 4, crop_name, "other")) %>% 
+  mutate(LS_group = fct_relevel(LS_group, "other", after = 0)) %>% 
+  rename(Crop = "crop_name") %>% 
+  mutate(Area = paste(signif(area_crop / 1000, 2), "tsd ha")) %>%  
+  ggplot(aes(x = region, y = area_crop, fill = LS_group, label = Crop, label2 = Area))+
+  geom_bar(stat = "identity", colour = "white", size = 0.1)+
+  theme_minimal()+
+  theme(legend.position = "bottom")+
+  guides(fill=guide_legend(ncol = 2,byrow=F, reverse = T))+
+  scale_fill_brewer(palette = "Paired")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+p  
+```
+
+
+
 
 + How does it look for lifestock?
 
@@ -201,18 +266,19 @@ ggplotly(p, tooltip = c("label2", "label")) %>% layout(legend = list(orientation
 p <- 
 RPD_2012_sub %>% 
   st_set_geometry(NULL) %>% 
+  select(region, djurid,djur, antal) %>% 
+  distinct() %>% 
   filter(!is.na(djurid)) %>% 
-  group_by(lan, djur) %>% 
+  group_by(region, djur) %>% 
   summarise(antal_djur = sum(antal)) %>% 
-  arrange(lan, desc(antal_djur)) %>% 
+  arrange(region, desc(antal_djur)) %>% 
   mutate(rank = dense_rank(desc(antal_djur))) %>% 
   ungroup() %>% 
   mutate(LS_group = ifelse(rank <= 4, djur, "other")) %>%
   mutate(LS_group = fct_relevel(LS_group, "other", after = 0)) %>% 
   rename(Djur = "djur") %>% 
   mutate(Antal = paste(signif(antal_djur / 1000, 3), "tsd")) %>%  
-  left_join(county_codes) %>% 
-  ggplot(aes(x = County, y = antal_djur, fill = LS_group, label = Djur, label2 = Antal))+
+  ggplot(aes(x = region, y = antal_djur, fill = LS_group, label = Djur, label2 = Antal))+
   geom_bar(stat = "identity")+
   theme_minimal()+
   #theme(legend.position = "bottom")+
@@ -223,12 +289,107 @@ RPD_2012_sub %>%
 ggplotly(p, tooltip = c("label", "label2")) %>% layout(legend = list(orientation = "h", x = 0, y =-1))
 ```
 
-+ How does it look for lifestock-units?
++ group Lifestock in broader classes
 
 ```{r}
-Livestock_id <- read_csv2("Livestock_id.csv")
+Livestock_groups <- read_csv2("Livestock_id.csv")
+
+p <- 
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(Livestock_groups) %>% 
+  select(region, djurid,antal, Type) %>% 
+  distinct() %>% 
+  filter(!is.na(djurid)) %>% 
+  group_by(region, Type) %>% 
+  summarise(antal_djur = sum(antal)) %>% 
+  arrange(region, desc(antal_djur)) %>% 
+  mutate(rank = dense_rank(desc(antal_djur))) %>% 
+  ungroup() %>% 
+  mutate(Type = fct_relevel(Type)) %>% 
+  rename(Djur = Type) %>% 
+  mutate(Antal = paste(signif(antal_djur / 1000, 3), "tsd")) %>%  
+  ggplot(aes(x = region, y = antal_djur, fill = Djur, label = Djur, label2 = Antal))+
+  geom_bar(stat = "identity")+
+  theme_minimal()+
+  #theme(legend.position = "bottom")+
+  guides(fill=guide_legend(ncol = 4,byrow=F, reverse = T))+
+  scale_fill_manual(values=c(brewer.pal(8,"Paired"),brewer.pal(8,"Spectral")))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplotly(p, tooltip = c("label", "label2")) %>% layout(legend = list(orientation = "h", x = 0, y =-1))
+```
+
+
++ convert in lifestock units
+
+```{r}
+
+p <- 
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(Livestock_groups) %>% 
+  select(region, djurid,antal, LSUC, Type) %>% 
+  distinct() %>% 
+  filter(!is.na(djurid)) %>% 
+  mutate(antal = antal*as.numeric(LSUC)) %>% 
+  group_by(region, Type) %>% 
+  summarise(antal_djur = sum(antal)) %>% 
+  arrange(region, desc(antal_djur)) %>% 
+  mutate(rank = dense_rank(desc(antal_djur))) %>% 
+  ungroup() %>% 
+  mutate(Type = fct_relevel(Type)) %>% 
+  rename(Djur = Type) %>% 
+  mutate(Antal = paste(signif(antal_djur / 1000, 3), "tsd")) %>%  
+  ggplot(aes(x = region, y = antal_djur, fill = Djur, label = Djur, label2 = Antal))+
+  geom_bar(stat = "identity")+
+  theme_minimal()+
+  #theme(legend.position = "bottom")+
+  guides(fill=guide_legend(ncol = 4,byrow=F, reverse = T))+
+  scale_fill_manual(values=c(brewer.pal(8,"Paired"),brewer.pal(8,"Spectral")))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplotly(p, tooltip = c("label", "label2")) %>% layout(legend = list(orientation = "h", x = 0, y =-1))
+```
+
+
+explore teh co-occurence of crop codes with network analysis
+
+
+```{r}
+RPD_CC <- 
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>% 
+  select(region, kundnr1, blockid, areal, grodkod) %>% 
+  distinct() %>% 
+  group_by(region, kundnr1, grodkod) %>% 
+  summarise(area = sum(areal)) %>% 
+  spread(grodkod, area, fill = 0) %>% 
+  ungroup() %>% 
+  filter(region == "Skåne") %>% 
+  sample_n(50) %>% 
+  select(-region) %>% 
+  select_if(function(x) is.character(x) || sum(x) >0)
+
+RPD_CC <- as.data.frame(RPD_CC)
+rownames(RPD_CC) <- RPD_CC$kundnr1
+RPD_CC <- RPD_CC[,-1]
+
+#RPD_CC[RPD_CC > 1] <- 1
+
+CooC <- cooccur(RPD_CC, type = "site_spp", spp_names = TRUE ) 
+
+CooC$results %>% as_tibble() %>%  filter(p_lt > 0.05)
+
+
 
 ```
+
+
+
+
+
+
 
 
 ### Farms with largest N of animals by animal
