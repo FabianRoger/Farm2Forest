@@ -89,7 +89,7 @@ grid.arrange(p1,p2, nrow = 1)
 
 + `SAMIBLOCK_` : unique ID for each Reference Parcel (1.068528 Mio)
 
-+ `SKIFTESBET` : ??, 3510 levels, first 200 make up > 90%, ( first 10 make up ~ 30%)
++ `SKIFTESBET` : ??, 3510 levels, first 200 make up > 90%, (first 10 make up ~ 30%)
 
 + `EFATYPE`, 4 levels
     + Kvavefixerade grodor (0.5%)
