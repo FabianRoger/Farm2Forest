@@ -22,6 +22,7 @@ library(purrr)
 library(forcats)
 library(RColorBrewer)
 library(igraph)
+library(magrittr)
 ```
 
 
@@ -353,9 +354,11 @@ ggplotly(p, tooltip = c("label", "label2")) %>% layout(legend = list(orientation
 ```
 
 
-explore teh co-occurence of crop codes with network analysis
+clustering Farms by cropcodes
 
 
+
++ making a matrix of Farms (rows) and cropcodes (columns) with the area of each cropcode in each farm
 ```{r}
 RPD_CC <- 
 RPD_2012_sub %>% 
@@ -366,16 +369,358 @@ RPD_2012_sub %>%
   summarise(area = sum(areal)) %>% 
   spread(grodkod, area, fill = 0) %>% 
   ungroup() %>% 
-  filter(region == "Skåne") %>% 
-  sample_n(50) %>% 
+ # filter(region == "Skåne") %>% 
+  #sample_n(50) %>% 
   select(-region) %>% 
   select_if(function(x) is.character(x) || sum(x) >0)
 
 RPD_CC <- as.data.frame(RPD_CC)
 rownames(RPD_CC) <- RPD_CC$kundnr1
 RPD_CC <- RPD_CC[,-1]
+```
 
++ top 10 cropcodes by total area by region
+
+```{r}
+Top_10_CC <- 
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>% 
+  select(region, kundnr1, grodkod, areal) %>% 
+  distinct %>% 
+  group_by(region, grodkod) %>% 
+  summarise(areal = sum(areal)) %>% 
+  mutate(areal = areal/sum(areal)*100) %>%
+  ungroup %>% 
+  mutate(rank = dense_rank(desc(areal))) %>% 
+  left_join(crop_codes) %>%
+  mutate(crop_name = fct_reorder(crop_name, rank)) %>% 
+  group_by(region) %>% 
+  mutate(rank = dense_rank(desc(areal))) %>% 
+  filter(rank <= 10) %>% 
+  arrange(region, rank) %>% 
+  mutate(cum = round(cumsum(areal))) 
+
+
+ggplot(Top_10_CC, aes(x = rank, y = areal, fill = crop_name))+
+  geom_bar(stat = "identity")+
+  geom_text(aes(x = rank, y = areal+5, label = cum), size = 3)+
+  facet_wrap(~region)+
+  scale_fill_manual(values=c(brewer.pal(12,"Paired"),c(brewer.pal(12,"Paired"))))+
+  theme_bw()+
+  theme(legend.position = "bottom",
+        legend.title=element_blank())+
+  guides(fill=guide_legend(ncol=3))+
+  scale_x_continuous(breaks = c(1:10))+
+  labs(y = "total area and cumulative area in %")
+  
+  
+  
+
+```
+
++ cropcodes by 99th quantile of the % of total farm area 
+
+```{r}
+Min_5prct_CC <- 
+t(apply(RPD_CC, 1, function(x) (x/sum(x))*100)) %>% 
+  apply(.,2,function(x) quantile(x, 0.99)) %>% 
+  data.frame(max_prop = .) %>% 
+  rownames_to_column(var = "grodkod") %>% 
+  mutate(grodkod = as.numeric(grodkod)) %>% 
+  left_join(crop_codes) %>% 
+  arrange(max_prop) %>% 
+  select(-cropcode_year) %>% 
+  filter(max_prop > 5) %>% 
+  mutate(rank = min_rank(desc(max_prop))) %>% 
+  arrange(rank) %>% 
+  mutate(rank = 1:n()) %>% 
+  mutate(crop_name = fct_reorder(crop_name, rank))
+
+ggplot(Min_5prct_CC, aes(x = rank, y = max_prop, fill = crop_name))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values=c(brewer.pal(12,"Paired"),c(brewer.pal(12,"Paired"))))+
+  theme_bw()+
+  theme(legend.position = "bottom",
+        legend.title=element_blank())+
+  guides(fill=guide_legend(ncol=2))+
+  scale_x_continuous(breaks = c(1:20))+
+  labs(y = "%", title = "99th quantile of % accounted for by crop on any farm")
+```
+
+```{r}
+Top10 <-  Top_10_CC %>% ungroup %>% select(grodkod) %>% unique() %>% arrange(grodkod) %>% `[[`(.,1)
+Min_5 <-  Min_5prct_CC %>% select(grodkod) %>% unique() %>% arrange(grodkod) %>% `[[`(.,1)
+
+kept_CC <- 
+sort(union(Top10, Min_5)) %>% 
+  tibble(grodkod = .) %>% 
+  left_join(crop_codes) %>% 
+  select(-cropcode_year) %>% 
+  mutate(Top10 = grodkod %in% Top10) %>% 
+  mutate(Min_5 = grodkod %in% Min_5)
+
+kept_CC
+```
+
++ We exclude all cropcodes that do not fullfill either of the two criteria
+
+```{r}
+RPD_CC_sub <- RPD_CC[,colnames(RPD_CC) %in% kept_CC$grodkod]
+
+#exclude farms that have none (at most 1 ha) of the selected crops left
+
+RPD_CC_sub <- RPD_CC_sub[-c(rowSums(RPD_CC_sub) <= 1),]
+```
+
++ k-mean clustering of subsetted farm-crop matrix
+
+```{r}
+
+Results <- tibble(Cluster = 1:50) %>% 
+  mutate(kmeans = map(Cluster, ~kmeans(RPD_CC_sub, .x, nstart = 10))) 
+
+Results <-   
+Results %>% 
+  mutate(stats = map(kmeans, glance)) %>% 
+  unnest(stats)
+
+Results %>% 
+  select(Cluster, tot.withinss, betweenss) %>% 
+  gather(index, value, -Cluster) %>% 
+  ggplot(aes(Cluster, value))+
+  facet_wrap(~index)+
+  geom_line()+
+  geom_point()
+
+
+
+```
+
+This suggests that ~6 clusters might be reasonable
+
+```{r}
+k_mean <- kmeans(RPD_CC_sub, 6, nstart = 100)
+
+k_mean$centers %>% 
+  as_tibble() %>% 
+  mutate(cluster = 1:n()) %>% 
+  gather(grodkod, area, -cluster) %>% 
+  mutate(grodkod = as.numeric(grodkod)) %>% 
+  left_join(crop_codes) %>% 
+  ggplot(aes(x = cluster, y = area, fill = crop_name))+
+  geom_bar(stat="identity") +
+  theme_bw()+
+  theme(legend.position = "bottom",
+        legend.title=element_blank())+
+  guides(fill=guide_legend(ncol=2))+
+  scale_fill_manual(values=c(brewer.pal(12,"Paired"),viridisLite::viridis(12)))
+
+
+
+```
+```{r}
+Centers <- 
+  as.data.frame(k_mean$centers) %>% 
+  rownames_to_column(var = "Cluster") %>% 
+  gather(grodkod, area, -Cluster) %>% 
+  mutate(grodkod = as.numeric(grodkod)) %>% 
+  left_join(crop_codes) %>% 
+  group_by(grodkod) %>% 
+  mutate(max = max(area)) %>% 
+  filter(max > 2)
+
+Size <- 
+data.frame(size = k_mean$size) %>% 
+  rownames_to_column(var = "Cluster") 
+
+Clusters <-   
+k_mean$cluster %>% 
+  data.frame(Cluster = `.`) %>% 
+  rownames_to_column(var = "kundnr1") %>% 
+  left_join(rownames_to_column(as.data.frame(RPD_CC_sub), var = "kundnr1")) %>% 
+  gather(grodkod, area, -kundnr1, -Cluster) %>% 
+  mutate(grodkod = as.numeric(grodkod)) %>% 
+  left_join(crop_codes) %>% 
+  filter(grodkod %in% Centers$grodkod) 
+
+ggplot(Clusters, aes(x = as.factor(grodkod), y = area))+
+  geom_boxplot(outlier.size = 1, outlier.alpha = 0.3, aes(fill = crop_name))+
+  geom_point(data = Centers, aes(x = as.factor(grodkod), y = area, fill = crop_name), 
+             colour = "black", shape = 21)+
+  geom_text(data = Size, aes(x = 5, y = 300, label = size))+
+  facet_wrap(~Cluster)+theme_bw()+
+  theme(legend.position = "bottom",
+        legend.title=element_blank())+
+  guides(fill=guide_legend(ncol=2))+
+  scale_fill_manual(values=c(brewer.pal(12,"Paired"),viridisLite::viridis(12)))
+
+
+```
+
+The clustering based on cropcodes alone does not reveal many clear clusters. We add the animal data.
+
+```{r}
+
+RPD_DD <- 
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>% 
+  select(region, kundnr1, djurid, antal) %>% 
+  distinct() %>% 
+  filter(!is.na(djurid)) %>% 
+  left_join(distinct(select(Livestock_groups, djurid, LSUC))) %>%
+  mutate(LSUC = as.numeric(LSUC)) %>% 
+  mutate(antal = antal * LSUC) %>%
+  ungroup() %>% 
+  select(-region, -LSUC) %>% 
+  distinct() %>% 
+  spread(djurid, antal, fill = 0) %>%
+  select_if(function(x) is.character(x) || sum(x) >0)
+
+
+RPD_DD <- as.data.frame(RPD_DD)
+rownames(RPD_DD) <- RPD_DD$kundnr1
+RPD_DD <- RPD_DD[,-1]
+RPD_DD
+```
+
++ top 10 animal by total number by region
+
+```{r}
+Top_10_DD <- 
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>% 
+  select(region, kundnr1, djurid, antal) %>% 
+  distinct() %>% 
+  filter(!is.na(djurid)) %>% 
+  left_join(distinct(select(Livestock_groups, djurid, LSUC))) %>%
+  mutate(LSUC = as.numeric(LSUC)) %>% 
+  mutate(antal = antal * LSUC) %>% 
+  select(-kundnr1) %>% 
+  group_by(region, djurid) %>% 
+  summarise(antal = sum(antal)) %>% 
+  mutate(antal = antal/sum(antal)*100) %>%
+  ungroup %>%
+  mutate(rank = dense_rank(desc(antal))) %>% 
+  left_join(distinct(select(Livestock, djurid, djur))) %>% 
+  mutate(djur = fct_reorder(djur, rank)) %>% 
+  group_by(region) %>% 
+  mutate(rank = dense_rank(desc(antal))) %>% 
+  filter(rank <= 10) %>% 
+  arrange(region, rank) %>% 
+  mutate(cum = round(cumsum(antal))) 
+
+
+ggplot(Top_10_DD, aes(x = rank, y = antal, fill = djur))+
+  geom_bar(stat = "identity")+
+  geom_text(aes(x = rank, y = antal+2, label = cum), size = 3)+
+  facet_wrap(~region)+
+  scale_fill_manual(values=c(brewer.pal(12,"Paired"),viridisLite::viridis(12)))+
+  theme_bw()+
+  theme(legend.position = "bottom",
+        legend.title=element_blank())+
+  guides(fill=guide_legend(ncol=3))+
+  scale_x_continuous(breaks = c(1:10))+
+  labs(y = "total LSU cumulative LSU in %")
+  
+  
+  
+
+```
+
+
+
+
+
++ k-mean clustering of subsetted farm-crop matrix
+
+```{r}
+
+Results <- tibble(Cluster = 1:50) %>% 
+  mutate(kmeans = map(Cluster, ~kmeans(RPD_DD, .x, nstart = 10))) 
+
+Results <-   
+Results %>% 
+  mutate(stats = map(kmeans, glance)) %>% 
+  unnest(stats)
+
+Results %>% 
+  select(Cluster, tot.withinss, betweenss) %>% 
+  gather(index, value, -Cluster) %>% 
+  ggplot(aes(Cluster, value))+
+  facet_wrap(~index)+
+  geom_line()+
+  geom_point()
+
+
+
+```
+
+```{r}
+k_mean <- kmeans(RPD_DD, 10, nstart = 100)
+
+k_mean$centers %>% 
+  as_tibble() %>% 
+  mutate(cluster = 1:n()) %>% 
+  gather(djurid, antal, -cluster) %>% 
+  mutate(djurid = as.numeric(djurid)) %>% 
+  left_join(distinct(select(Livestock, djurid, djur))) %>% 
+  ggplot(aes(x = cluster, y = antal, fill = djur))+
+  geom_bar(stat="identity") +
+  theme_bw()+
+  theme(legend.position = "bottom",
+        legend.title=element_blank())+
+  guides(fill=guide_legend(ncol=4))+
+  scale_fill_manual(values=c(brewer.pal(12,"Paired"),viridisLite::viridis(18)))
+
+
+
+```
+
+```{r}
+Centers <- 
+  as.data.frame(k_mean$centers) %>% 
+  rownames_to_column(var = "Cluster") %>% 
+  gather(djurid, antal, -Cluster) %>% 
+  mutate(djurid = as.numeric(djurid)) %>% 
+  left_join(distinct(select(Livestock, djurid, djur))) %>% 
+  group_by(djurid) %>% 
+  mutate(max = max(antal)) %>% 
+  filter(max > 100)
+
+Size <- 
+data.frame(size = k_mean$size) %>% 
+  rownames_to_column(var = "Cluster") 
+
+k_mean$cluster %>% 
+  data.frame(Cluster = `.`) %>% 
+  rownames_to_column(var = "kundnr1") %>%
+  left_join(rownames_to_column(as.data.frame(RPD_DD), var = "kundnr1")) %>% 
+  gather(djurid, antal, -kundnr1, -Cluster) %>% 
+  mutate(djurid = as.numeric(djurid)) %>% 
+  left_join(distinct(select(Livestock, djurid, djur))) %>% 
+  filter(djurid %in% Centers$djurid) %>% 
+  ggplot(aes(x = as.factor(djurid), y = antal))+
+  geom_boxplot(outlier.size = 1, outlier.alpha = 0.3, aes(fill = djur))+
+  geom_point(data = Centers, aes(x = as.factor(djurid), y = antal, fill = djur), colour = "black", shape = 21)+
+  geom_text(data = Size, aes(x = 5, y = 500, label = size))+
+  facet_wrap(~Cluster)+
+  theme_bw()+
+  theme(legend.position = "bottom",
+        legend.title=element_blank())+
+  guides(fill=guide_legend(ncol=4))+
+  scale_fill_manual(values=c(brewer.pal(12,"Paired"),viridisLite::viridis(12)))
+
+
+```
+
+```{r}
 #RPD_CC[RPD_CC > 1] <- 1
+
+RPD_dist <- vegdist(RPD_CC)
+
+Hclust_RPD <- hclust(RPD_dist)
+
+plot(Hclust_RPD)
 
 CooC <- cooccur(RPD_CC, type = "site_spp", spp_names = TRUE ) 
 
@@ -384,6 +729,10 @@ CooC$results %>% as_tibble() %>%  filter(p_lt > 0.05)
 
 
 ```
+
+
+
+ 
 
 
 
