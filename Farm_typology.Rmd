@@ -656,6 +656,7 @@ Results %>%
 ```
 
 ```{r}
+set.seed(20180618)
 k_mean <- kmeans(RPD_DD, 10, nstart = 100)
 
 k_mean$centers %>% 
@@ -691,14 +692,17 @@ Size <-
 data.frame(size = k_mean$size) %>% 
   rownames_to_column(var = "Cluster") 
 
+Clusters <- 
 k_mean$cluster %>% 
   data.frame(Cluster = `.`) %>% 
   rownames_to_column(var = "kundnr1") %>%
   left_join(rownames_to_column(as.data.frame(RPD_DD), var = "kundnr1")) %>% 
   gather(djurid, antal, -kundnr1, -Cluster) %>% 
   mutate(djurid = as.numeric(djurid)) %>% 
-  left_join(distinct(select(Livestock, djurid, djur))) %>% 
-  filter(djurid %in% Centers$djurid) %>% 
+  left_join(distinct(select(Livestock, djurid, djur)))
+
+Clusters %>% 
+filter(djurid %in% Centers$djurid) %>% 
   ggplot(aes(x = as.factor(djurid), y = antal))+
   geom_boxplot(outlier.size = 1, outlier.alpha = 0.3, aes(fill = djur))+
   geom_point(data = Centers, aes(x = as.factor(djurid), y = antal, fill = djur), colour = "black", shape = 21)+
@@ -712,6 +716,25 @@ k_mean$cluster %>%
 
 
 ```
+
+As we did no prior filtering of the data, the cluster pick up mostly the largest farms, specialized in 
+
+*note: if the seed changed these clusters will likely not correspond*
+
++ Milk production (cluster 5, 10 - [25,158])
++ Porc production (cluster 2, 6 and 9 - [11,2,2])
++ Chicken production (cluster 8 - [4])
++ Bovine prodcution (cluster 7 - [3])
+
+Closer look at the farms in this cluster 
+
+```{r}
+Clusters %>% 
+  filter(Cluster %in% c(2,5,6,7,8,9,10)) %>% 
+  select(-djurid) %>% 
+  spread(djur, antal)
+```
+
 
 ```{r}
 #RPD_CC[RPD_CC > 1] <- 1
