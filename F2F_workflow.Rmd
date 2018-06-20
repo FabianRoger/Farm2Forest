@@ -37,6 +37,7 @@ but maybe intensification of underused forest
 
 ### Scenarios
 
+<<<<<<< HEAD
 + cap-reform.eu
 + delegating responsability to member states gives more lee-way for "interesting" scenarios
 + renationalization of agricultural policy
@@ -72,3 +73,6 @@ possible new payment for bioenergy production (threat to agricultural landscape)
 
 last week of august: meeting with JBV and Jönköpings Länstyrelsen in Jönköping
 
+=======
++ Test
+>>>>>>> 1fe470d95a87cc72138873c71c9103278f9d6a00
