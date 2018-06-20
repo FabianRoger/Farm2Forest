@@ -4,6 +4,7 @@ date: "6/19/2018"
 title: "F2F Workplan"
 output:
   html_document:
+    keep_md: yes
     theme:  flatly
     toc: yes
 ---
@@ -20,14 +21,54 @@ output:
 + What data do we need for that and where / how do we get it? 
 + Do we need to add new actors?
 
+can we focus on "normal forestry", i.e. spruce with 70 year rotation period 
+but maybe intensification of underused forest 
+
 ### Typical farms
 
 + Once we have selected 'typical farms' how do we implement that in Agripolis
 + What additional information do we need to characterize Farms by new activities
++ some measure of how isolated farms are 
++ check how distributed dif
 
 ### Habitat mapping
 
 + Could we get at habitat conversion by looking which blocks are lost from block-database and see what they are now?
 
 ### Scenarios
+
++ cap-reform.eu
++ delegating responsability to member states gives more lee-way for "interesting" scenarios
++ renationalization of agricultural policy
+
+
+How to define scanrios: 
++ Skype meeting with JBV after Summer (September) [David, Torbjörn, who else, Näringsdepartementet?] 
+  + what are the current reflection within Sweden
+  + possibility of regional policies
+  + possibility of moving money (up to 30%?) to pillar 2 (where the environmental schemes live)
+  + Who are the different actors
+  
+  Important actors:
+  + Farmers organizations
+  + environmental interest groups (but not much influence)
+  +
+  
+Possibility to interview 
+
+face-to-face or phone interview with standardized Questions + some open questions
+
+
+Strategy:
+
+1) define scenarios with JBV
+2) 
+
+Spetember 17th: BECC MERGE refernce group meeting abt Bioenergy with represntative from forestry, agricultural sector and energy sector, with long structured dicussion with expected future changes in landuse and policy with expected agricultural policy and possibility to produce more bioenergy on agricultural land
+
+New activity:
+
+possible new payment for bioenergy production (threat to agricultural landscape) 
+
+last week of august: meeting with JBV and Jönköpings Länstyrelsen in Jönköping
 
