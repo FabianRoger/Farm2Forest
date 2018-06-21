@@ -80,13 +80,6 @@ Sweden %>%
 ```
 
 
-### load data about location of Farmsteads 
-```{r}
-Farmstead <- read_delim("/Volumes/Fabian_Work/Brukare_brukningscentrum_ansi.txt", delim = "\t", locale = locale(encoding = "latin1"))
-
-Farmstead <- filter(Farmstead, `Brukningscentrum JA/NEJ` == "Ja") %>% select(Kundnr, `Block Id`, `Brukningscentrum JA/NEJ`)
-```
-
 
 
 ### subset for study regions

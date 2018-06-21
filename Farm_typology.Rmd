@@ -18,11 +18,15 @@ library(readxl)
 library(dplyr)
 library(tidyr)
 library(multidplyr)
+library(kohonen)
+library(cluster)
 library(purrr)
 library(forcats)
 library(RColorBrewer)
 library(igraph)
-library(magrittr)
+
+
+
 ```
 
 
@@ -135,7 +139,8 @@ head(crop_codes)
 
 ```{r, eval = TRUE}
 Livestock <- Livestock %>% 
-  select(djurid, djur, antal, kundnr1)
+  select(djurid, djur, antal, kundnr1) %>% 
+  distinct()
 
 RPD_2012_sub <- left_join(RPD_2012_sub, Livestock)
 
@@ -146,9 +151,7 @@ as_tibble(RPD_2012_sub)
 
 
 
-## summary statistics
-
-+ distribution of land are per kundnr
+##  distribution of land are per kundnr
 + `blockarea` gives the area of the block, which corresponds to the area of the shape in the `geometry` column
 + `areal` gives the are of the crop *within* each block
 
@@ -156,10 +159,10 @@ as_tibble(RPD_2012_sub)
 
 RPD_2012_sub %>% 
   st_set_geometry(NULL) %>%
-  select(region, kundnr1, blockarea) %>% 
+  select(region, kundnr1, blockid, grodkod, areal) %>% 
   distinct() %>% 
   group_by(region, kundnr1) %>% 
-  summarise(tot_area = sum(blockarea)) %>% 
+  summarise(tot_area = sum(areal)) %>% 
   mutate(median = median(tot_area)) %>% 
   ggplot(aes(x = tot_area, fill = region)) +
   geom_histogram(binwidth = 0.1, alpha = 0.8)+
@@ -169,9 +172,89 @@ RPD_2012_sub %>%
   facet_wrap(~region, nrow = 1)+
   scale_x_log10()+
   theme_minimal()+
-  labs(x = "total farm size in ha", title = "log-normal distribution of land area per kundnr" )
+  labs(x = "total farm size in ha", title = "log-normal distribution of land area per kundnr" )+
+  scale_fill_brewer(palette = "Set1")
+
+```
+
+### median of field size by region
+
++ one field is defined as on grodkod on one block
+*right now I take the median of all cropcodes, e.g. including things like flowerstrips which will skew the field size down a bit*
+
+```{r}
+
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>%
+  select(region, kundnr1, blockid, grodkod, areal) %>% 
+  distinct() %>% 
+  group_by(region, kundnr1 ) %>% 
+  summarise(median_field = median(areal)) %>%
+  group_by(region) %>% 
+  mutate(median = median(median_field)) %>% 
+  ggplot(aes(x = median_field, fill = region)) +
+  geom_histogram(binwidth = 0.1, alpha = 0.8)+
+  stat_density(geom="line", aes(y=0.1 * ..count..), colour = "blue", size = 1)+
+  geom_vline(aes(xintercept = median))+
+  geom_text(aes(label = signif(median,2), x = median+10, y = 250))+
+  facet_wrap(~region, nrow = 1)+
+  scale_x_log10()+
+  theme_minimal()+
+  labs(x = "total farm size in ha", title = "log-normal of median field sizes")+
+  scale_fill_brewer(palette = "Set1")
   
 
+```
+
+```{r}
+
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>%
+  select(region, kundnr1, blockid, grodkod, areal) %>% 
+  distinct() %>% 
+  group_by(region, kundnr1 ) %>% 
+  summarise(tot_size = sum(areal),
+            median_field = median(areal),
+            min_field = quantile(areal, 0.05),
+            max_field = quantile(areal, 0.95)) %>%
+  group_by(region) %>% 
+  arrange(tot_size) %>% 
+  mutate(rank = 1:n()) %>% 
+  ggplot(aes(colour = region)) +
+  geom_errorbar(aes(x = rank, ymin = min_field, ymax = max_field),
+                  alpha = 0.3)+
+  geom_point(aes(x = rank, y = median_field), colour = "black", size = 0.5)+
+  facet_wrap(~region, nrow = 1, scales = "free")+
+  theme_minimal()+
+  labs(x = "farm size in ha", y = "field size range in ha")+
+  #scale_x_continuous(limits = c(0,10))+
+  scale_colour_brewer(palette = "Set1")
+  
+
+```
+
+
+
+### distance from fields 
+
+### load data about location of Farmsteads 
+```{r}
+Farmstead <- read_delim("/Volumes/Fabian_Work/Brukare_brukningscentrum_ansi.txt", delim = "\t", locale = locale(encoding = "latin1")) %>% 
+  select(`Block Id`, Kundnr,`Brukningscentrum JA/NEJ`) %>% 
+  rename(blockid = `Block Id`,
+         kundnr1 = Kundnr,
+         Farm = `Brukningscentrum JA/NEJ`) %>% 
+  filter(Farm == "Ja")
+```
+
+```{r}
+
+RPD_2012_sub %>% 
+  filter(kundnr1 =="M 12066" ) %>% 
+  select(kundnr1) %>% 
+  distinct() %>% 
+  #st_combine() 
+  plot
 
 ```
 
@@ -352,10 +435,134 @@ RPD_2012_sub %>%
 
 ggplotly(p, tooltip = c("label", "label2")) %>% layout(legend = list(orientation = "h", x = 0, y =-1))
 ```
+## clustering Farms by size
+
+```{r}
+RPD_size <- 
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>% 
+  select( blockid, kundnr1, grodkod, areal) %>% 
+  distinct %>% 
+  group_by(kundnr1) %>% 
+  summarise(size = sum(areal))
+
+RPD_size <- matrix(RPD_size$size, ncol = 1, dimnames = list(RPD_size$kundnr1, "Size") )
 
 
-clustering Farms by cropcodes
+Results <- tibble(Cluster = 1:20) %>% 
+  mutate(kmeans = purrr::map(Cluster, ~kmeans(RPD_size, .x, nstart = 10))) 
 
+Results <-   
+Results %>% 
+  mutate(stats = purrr::map(kmeans, glance)) %>% 
+  unnest(stats)
+
+Results %>% 
+  select(Cluster, tot.withinss, betweenss) %>% 
+  gather(index, value, -Cluster) %>% 
+  ggplot(aes(Cluster, value))+
+  facet_wrap(~index)+
+  geom_line()+
+  geom_point()
+
+```
+
+The clustering suggests 5 size classes
+
+```{r}
+
+k_mean <- kmeans(RPD_size, 5, nstart = 100)
+
+Centers <- 
+  as.data.frame(k_mean$centers) %>% 
+  rownames_to_column(var = "Cluster") %>% 
+  mutate(Cluster = as.factor(Cluster)) %>% 
+  mutate(Cluster = fct_reorder(Cluster, Size))
+
+Size <- 
+data.frame(size = k_mean$size) %>% 
+  rownames_to_column(var = "Cluster") %>% 
+  mutate(Cluster = as.factor(Cluster)) %>% 
+  mutate(Cluster = fct_reorder(Cluster, size))
+
+Clusters <- 
+k_mean$cluster %>% 
+  data.frame(Cluster = `.`) %>% 
+  rownames_to_column(var = "kundnr1") %>%
+  left_join(rownames_to_column(as.data.frame(RPD_size), var = "kundnr1")) %>% 
+  left_join(distinct(select(st_set_geometry(RPD_2012_sub, NULL), kundnr1, region))) %>% 
+  mutate(Cluster = as.factor(Cluster)) %>% 
+  mutate(Cluster = fct_reorder(Cluster, Size))
+
+Clusters %>% 
+  ggplot(aes(x = as.factor(Cluster), y = Size))+
+  #geom_boxplot(outlier.size = 1, outlier.alpha = 0.3, fill = NA)+
+  geom_point(aes(colour = region), position = position_jitterdodge(jitter.width = 0.2), alpha = 0.3)+
+  geom_point(data = Centers, aes(x = as.factor(Cluster), y = Size), colour = "black", size = 2, shape = 21)+
+  geom_text(data = Size, aes(x = as.factor(Cluster), y = 700, label = size))+
+  theme_bw()+
+  scale_colour_viridis_d()
+
+Clusters %>% 
+  mutate(Cluster = as.factor(Cluster)) %>% 
+  mutate(Cluster = fct_reorder(Cluster, Size)) %>% 
+  ggplot(., aes(x = Size, fill = factor(Cluster)))+
+  geom_histogram(position = "dodge", binwidth = 2)+
+  theme_bw()+
+  facet_grid(Cluster~., scales = "free_y")+
+  scale_fill_brewer(palette = "Set1")
+
+
+```
+
+##correspondance between Farm size and Lifestock units
+
+```{r}
+
+Farm_size <- 
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>%
+  select(kundnr1, region, blockid, grodkod, areal) %>% 
+  distinct() %>% 
+  group_by(kundnr1,region) %>% 
+  summarise(areal = sum(areal))
+  
+Farm_LS <- 
+  RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>%
+  select(kundnr1, djurid, antal) %>% 
+  distinct() %>% 
+  left_join(Livestock_groups) %>% 
+  group_by(kundnr1) %>% 
+  mutate(LSUC = as.numeric(LSUC)) %>% 
+  mutate(antal = antal * LSUC) %>% 
+  summarise(LSU_sum = sum(antal)) %>% 
+  mutate(LSU_sum = ifelse(is.na(LSU_sum), 0, LSU_sum))
+
+left_join(Farm_size, Farm_LS) %>% 
+  ggplot( aes( x = LSU_sum, y = areal, colour = region))+
+  geom_point(alpha = 0.5)+
+  facet_wrap(~region, nrow = 2)+
+  geom_abline(intercept = c(0,0), slope = 1)+
+  scale_color_brewer(palette = "Set1")+
+  theme_bw()+
+  scale_y_continuous(limits = c(0,500))+
+  scale_x_continuous(limits = c(0,500))
+
+RPD_2012_sub %>% 
+  st_set_geometry(NULL) %>% 
+  select(blockid, kundnr1) %>% 
+  distinct() %>% 
+  group_by(blockid) %>% 
+  summarise(n = n()) %>% 
+  select(n) %>% 
+  table()
+
+```
+
+
+
+## clustering Farms by cropcodes
 
 
 + making a matrix of Farms (rows) and cropcodes (columns) with the area of each cropcode in each farm
@@ -734,6 +941,8 @@ Clusters %>%
   select(-djurid) %>% 
   spread(djur, antal)
 ```
+
+
 
 
 ```{r}
