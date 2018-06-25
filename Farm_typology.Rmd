@@ -247,15 +247,117 @@ Farmstead <- read_delim("/Volumes/Fabian_Work/Brukare_brukningscentrum_ansi.txt"
   filter(Farm == "Ja")
 ```
 
+## shortest path to visit all fields
+
++ this is a step-by-step walk-through how I calculate the shortest path
+
+1) subset for one kundr
+2) calculate centroid of each field
+
+(we also join the info about the Farmstead but we do not use it in the calculations yet)
 ```{r}
 
+# large network : "F 3311"
+# small network : "F 10234"
+test <- 
 RPD_2012_sub %>% 
-  filter(kundnr1 =="M 12066" ) %>% 
-  select(kundnr1) %>% 
+  filter(kundnr1 =="F 10234" ) %>% 
+  left_join(Farmstead) %>% 
+  select( Farm) %>% 
   distinct() %>% 
-  #st_combine() 
+  rename(geometry = geom) %>% 
+  mutate(centroids = st_centroid(geometry)) 
+
+test %>% 
+  ggplot(., aes(colour = Farm))+
+  geom_sf()+
+  geom_sf(aes(geometry = centroids), size = 0.2, colour = "blue")+
+  theme_bw()+
+  theme(legend.position = "none")
+```
++ transform centroids in linestring object containing all path between centroids
+
+3) extract all centroids and arrange them in matrix
+4) combine centroids in all possible combinations to get all path between centroids
+5) make multilinestring sf object from list and res-set crs
+6) cast to linestring and transform it to spatial dataframe (with random feature)
+```{r}
+test_LS <- matrix(unlist(test$centroids), ncol =2, byrow = T)
+comb <- combn(c(1:nrow(test_LS)),2)
+
+test_LS <- 
+  apply(comb, 2, function(x) list(test_LS[x,])) %>% 
+  unlist(recursive = F) %>% 
+  st_multilinestring() %>% 
+  st_sfc() %>% 
+  st_set_crs(st_crs(test)) 
+
+test_LS <- st_cast(test_LS, "LINESTRING")
+test_LS <- st_sf(a = sample(LETTERS, ncol(comb), replace = T), 
+                 geom = test_LS)
+
+
+test %>% 
+  ggplot(.)+
+  geom_sf(aes(colour = Farm))+
+  geom_sf(aes(geometry = centroids), colour = "blue", size = 0.2)+
+  geom_sf(data = test_LS, size = 0.05, alpha = 0.1)+
+  theme_bw()
+```
+
++ transform to graph
+
+7) transform to class `SpatialLinesDataFrame`
+8) use the `readshpnw` function from the `shp2graph` package to extract nodes, edges and calculate distances between nodes
+9) use `nel2igraph` function to convert it to a weighted graph of class `igraph`
+
+```{r}
+Test_sp <- as(test_LS, 'Spatial') 
+
+Graph <- readshpnw(Test_sp, 
+                   ea.prop = c(0),
+                   ELComputed = T, 
+                   longlat = T)
+                   
+g = nel2igraph(Graph[[2]],
+               Graph[[3]], 
+               weight=Graph[[4]])
+
+plot(g)
+```
++ find shortest path connecting all edges
+
+I use the travelling salesman package `TSP` to find the shortest path connecting all fields
+
+10) calculate distance matrix between all edges and transform to `TSP` object
+11) calculate shortest path. **OBS** this uses a heuristic and is not necesarily the best solution 
+
+```{r}
+TSP_obj <- TSP(distances(g))
+TSP_sol <- solve_TSP(TSP_obj,
+                    # method = "farthest_insertion",
+                     repetitions = 100)
+
+L <- labels(TSP_sol)
+L <- c(L[1], rep(L[-c(1, length(L))], each = 2), L[length(L)]) %>% 
+  as.numeric()
+
+g %>% 
+  set_edge_attr( "color", value = "grey") %>% 
+  set_edge_attr( "color", value = "red",index = get.edge.ids(g, L)) %>% 
   plot
 
+test_LS$SP <- ""
+test_LS$SP[get.edge.ids(g, L)] <- "yes"
+
+test %>% 
+  ggplot(.)+
+  geom_sf(aes(colour = Farm))+
+  geom_sf(aes(geometry = centroids), colour = "blue", size = 0.2)+
+  geom_sf(data = filter(test_LS, SP == "yes"),
+          colour = "darkred", size = 0.2, alpha = 0.1)+
+  theme_bw()+
+  theme(legend.position = "none")
 ```
 
 
