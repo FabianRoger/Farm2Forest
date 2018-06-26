@@ -24,6 +24,9 @@ library(purrr)
 library(forcats)
 library(RColorBrewer)
 library(igraph)
+library(shp2graph)
+library(TSP)
+library(furrr)
 
 
 
@@ -258,7 +261,7 @@ Farmstead <- read_delim("/Volumes/Fabian_Work/Brukare_brukningscentrum_ansi.txt"
 ```{r}
 
 # large network : "F 3311"
-# small network : "F 10234"
+# smaller network : "F 10234"
 test <- 
 RPD_2012_sub %>% 
   filter(kundnr1 =="F 10234" ) %>% 
@@ -358,6 +361,113 @@ test %>%
           colour = "darkred", size = 0.2, alpha = 0.1)+
   theme_bw()+
   theme(legend.position = "none")
+```
+
+### calculate shortest path for all Farms
+
++ calculate polygone centroids
+```{r}
+
+# calculate polygone centroids for all blocks
+RPD_2012_sub_C <- 
+  RPD_2012_sub %>% 
+  select(kundnr1, blockid) %>% 
+  distinct() %>% 
+  mutate(centroids = st_centroid(geom))
+
+```
+
+
++ define function to get a fully connected graph with all centroids for each farm with at least 3 blocks
+
+```{r}
+
+get_graph <- function(x, CRS){
+  
+  # get coordinates from the centroids
+  centroid_coord <- matrix( unlist(x), ncol =2, byrow = T)
+  
+  if( nrow(centroid_coord) < 3) { return(x)
+  } else{
+  
+    #all possible (undirectional) lines between centroids 
+  comb <- combn( c( 1:nrow( centroid_coord)),2)
+  
+  all_lines <- 
+  apply(comb, 2, function(x) list( centroid_coord[x,])) %>% 
+  unlist(recursive = F) %>% 
+  st_multilinestring() %>% 
+  st_sfc() %>% 
+  st_set_crs(CRS) %>% 
+  st_cast("LINESTRING")
+  
+  #transform to psatial dataframe
+  all_lines_df <- st_sf(a = sample(LETTERS, ncol(comb), replace = T), 
+                 geom = all_lines)
+  
+  all_lines_SP <- as(all_lines_df, 'Spatial') 
+  
+  Graph <- readshpnw(all_lines_SP, 
+                     ea.prop = c(0),
+                     ELComputed = T, 
+                     longlat = T)
+  
+  g = nel2igraph(Graph[[2]],
+               Graph[[3]], 
+               weight=Graph[[4]])
+  return(g)
+      
+    }
+}
+```
+
++ make graphs
+```{r}
+plan(multiprocess)
+
+tic()
+
+RDP_graph <- 
+  RPD_2012_sub_C %>% 
+  split(.$kundnr1) %>% 
+  future_map(function(x) get_graph(x$centroids, st_crs(RPD_2012_sub_test)), .progress = TRUE) %>% 
+  tibble(graph = .) %>% 
+  mutate(kundnr1 = names(graph))
+
+toc()
+
+RDP_graph <- 
+RDP_graph %>% 
+  rowwise() %>% 
+  mutate(Class = class(graph)[1])
+```
+
++ calculate shortest path connecting all centroids for each Farm with > 2 fields
+
+```{r}
+plan(multiprocess)
+
+tic()
+
+SP <- 
+RDP_graph %>% 
+  filter(Class == "igraph") %>% 
+  select(graph) %>% 
+  unlist(recursive = F, use.names = F) %>% 
+  future_map(distances) %>% 
+  future_map(TSP) %>% 
+  future_map(solve_TSP, method = Rep[i], repetitions = 1) %>% 
+  future_map(attr,"tour_length") 
+
+toc()
+
+SP <- tibble(SP = unlist(SP), 
+             kundnr1 = RDP_graph[RDP_graph$Class == "igraph",]$kundnr1)
+
+#RPD_2012_sub <- 
+ # left_join(RPD_2012_sub, RDP_graph) %>% 
+  #left_join(SP) %>% 
+  #left_join(RPD_2012_sub_C)
 ```
 
 
